@@ -241,7 +241,7 @@ export default function MatchDetailsPage() {
       </div>
 
       {/* Match Header */}
-      <Card variant="gradient" className="overflow-hidden">
+      <Card variant="accent" className="overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-accent/5 via-transparent to-accent-secondary/5 pointer-events-none" />
         <CardContent className="relative">
           <div className="flex flex-col items-center gap-6 py-4">

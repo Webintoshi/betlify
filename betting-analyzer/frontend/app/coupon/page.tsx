@@ -207,7 +207,7 @@ export default function CouponPage() {
 
       {/* Summary Card */}
       {selections.length > 0 && (
-        <Card variant="gradient">
+        <Card variant="accent">
           <CardHeader>
             <div className="flex items-center gap-2">
               <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
