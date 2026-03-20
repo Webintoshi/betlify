@@ -3,7 +3,8 @@ version: "3.8"
 services:
   frontend:
     build:
-      context: ./frontend
+      context: ./betting-analyzer/frontend
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
     environment:
@@ -15,7 +16,8 @@ services:
 
   backend:
     build:
-      context: ./backend
+      context: ./betting-analyzer/backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
