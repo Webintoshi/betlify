@@ -73,7 +73,7 @@ def evaluate_markets(
                 "odd": float(odd),
                 "ev": round(ev, 4),
                 "ev_percentage": round(ev * 100.0, 2),
-                "recommended": bool(can_recommend and ev > 0),
+                "recommended": bool(ev > 0.05 and (can_recommend or ev > 0.30)),
             }
         )
 
@@ -81,7 +81,7 @@ def evaluate_markets(
     best_market = sorted_results[0] if sorted_results else None
 
     if best_market and not can_recommend:
-        best_market = {**best_market, "recommended": False}
+        best_market = {**best_market, "recommended": bool(best_market.get("ev", 0) > 0.05)}
 
     return {
         "confidence_score": round(confidence_score, 2),
