@@ -1,0 +1,13 @@
+# frontend
+frontend/node_modules
+frontend/.next
+
+# backend
+backend/__pycache__/
+backend/.venv/
+
+# general
+.env
+.env.local
+backend/.env
+frontend/.env.local
