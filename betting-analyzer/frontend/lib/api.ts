@@ -66,6 +66,13 @@ export type HealthResponse = {
 
 export type MatchAnalysisResponse = {
   match_id: string;
+  lambda?: {
+    home: number;
+    away: number;
+    ht_home: number;
+    ht_away: number;
+  };
+  confidence_score?: number;
   analysis: {
     confidence_score: number;
     recommended: boolean;
@@ -76,6 +83,7 @@ export type MatchAnalysisResponse = {
     confidence_threshold: number;
     recommended: boolean;
     best_market: {
+      market?: string;
       market_type: string;
       predicted_outcome: string;
       probability: number;
@@ -83,8 +91,10 @@ export type MatchAnalysisResponse = {
       ev: number;
       ev_percentage: number;
       recommended: boolean;
+      kelly_pct?: number;
     } | null;
     all_markets: Array<{
+      market?: string;
       market_type: string;
       predicted_outcome: string;
       probability: number;
@@ -92,9 +102,12 @@ export type MatchAnalysisResponse = {
       ev: number;
       ev_percentage: number;
       recommended: boolean;
+      kelly_pct?: number;
+      suspicious_high_ev?: boolean;
     }>;
   };
   recommended_market: {
+    market?: string;
     market_type: string;
     predicted_outcome: string;
     probability: number;
@@ -102,6 +115,7 @@ export type MatchAnalysisResponse = {
     ev: number;
     ev_percentage: number;
     recommended: boolean;
+    kelly_pct?: number;
   } | null;
   match?: {
     id: string;

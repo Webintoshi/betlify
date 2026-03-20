@@ -877,6 +877,179 @@ class SofaScoreService:
         return payload
 
     @staticmethod
+    def _normalize_stat_key(value: str) -> str:
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    def _find_numeric_value(self, payload: Any, key_candidates: List[str]) -> Optional[float]:
+        targets = [self._normalize_stat_key(item) for item in key_candidates]
+
+        def walk(node: Any) -> Optional[float]:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_norm = self._normalize_stat_key(str(key))
+                    if key_norm in targets and not isinstance(value, (dict, list)):
+                        parsed = _safe_float(value, fallback=float("nan"))
+                        if parsed == parsed:
+                            return parsed
+                    nested = walk(value)
+                    if nested is not None:
+                        return nested
+            elif isinstance(node, list):
+                for item in node:
+                    nested = walk(item)
+                    if nested is not None:
+                        return nested
+            return None
+
+        return walk(payload)
+
+    async def get_team_halftime_statistics(
+        self,
+        team_id: str,
+        sofascore_team_id: int,
+        season: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if sofascore_team_id <= 0:
+            return None
+        params: Dict[str, Any] = {}
+        if season:
+            params["season"] = season
+        payload = await self._request(f"/team/{sofascore_team_id}/statistics", params=params, ttl_seconds=3600)
+        if payload is None:
+            return None
+
+        goals_scored_first_half = self._find_numeric_value(
+            payload,
+            [
+                "goalsScoredFirstHalf",
+                "goalsForFirstHalf",
+                "firstHalfGoalsScored",
+                "scoredFirstHalf",
+                "gsh1",
+            ],
+        )
+        goals_conceded_first_half = self._find_numeric_value(
+            payload,
+            [
+                "goalsConcededFirstHalf",
+                "goalsAgainstFirstHalf",
+                "firstHalfGoalsConceded",
+                "concededFirstHalf",
+            ],
+        )
+        goals_scored_total = self._find_numeric_value(
+            payload,
+            ["goalsScoredTotal", "goalsScored", "goalsForTotal", "goalsFor"],
+        )
+        goals_conceded_total = self._find_numeric_value(
+            payload,
+            ["goalsConcededTotal", "goalsConceded", "goalsAgainstTotal", "goalsAgainst"],
+        )
+        matches_played = self._find_numeric_value(payload, ["matchesPlayed", "played", "gamesPlayed", "matches"])
+        matches_count = max(1.0, goals_scored_total if matches_played is None else matches_played)
+
+        if goals_scored_first_half is None and goals_scored_total is not None:
+            goals_scored_first_half = goals_scored_total * 0.42
+        if goals_conceded_first_half is None and goals_conceded_total is not None:
+            goals_conceded_first_half = goals_conceded_total * 0.40
+        if goals_scored_total is None:
+            goals_scored_total = max(1.0, (goals_scored_first_half or 0.0) / 0.42)
+        if goals_conceded_total is None:
+            goals_conceded_total = max(1.0, (goals_conceded_first_half or 0.0) / 0.40)
+
+        ht_ratio = (
+            (float(goals_scored_first_half) / float(goals_scored_total))
+            if float(goals_scored_total) > 0
+            else 0.42
+        )
+        record = {
+            "team_id": team_id,
+            "season": str(season or ""),
+            "ht_goals_scored_avg": round(float(goals_scored_first_half) / matches_count, 2),
+            "ht_goals_conceded_avg": round(float(goals_conceded_first_half) / matches_count, 2),
+            "ht_goals_ratio": round(max(0.25, min(0.6, ht_ratio)), 2),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if self.supabase is not None:
+            try:
+                self.supabase.table("ht_stats").upsert(record, on_conflict="team_id,season").execute()
+            except Exception:
+                logger.warning("ht_stats upsert skipped (table may be missing). team_id=%s", team_id)
+        return record
+
+    async def get_tournament_season_overall_statistics(
+        self,
+        tournament_id: int,
+        season_id: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        if tournament_id <= 0 or season_id <= 0:
+            return None
+        payload = await self._request(
+            f"/unique-tournament/{tournament_id}/season/{season_id}/statistics/overall",
+            ttl_seconds=3600,
+        )
+        if payload is None:
+            return None
+        stats_list = payload.get("statistics", []) if isinstance(payload, dict) else []
+        if not isinstance(stats_list, list):
+            return None
+        normalized: List[Dict[str, Any]] = []
+        for row in stats_list:
+            if not isinstance(row, dict):
+                continue
+            expected_goals = self._find_numeric_value(row, ["expectedGoals", "xg"])
+            shots_on_target = self._find_numeric_value(row, ["shotsOnTarget", "sot"])
+            big_chances = self._find_numeric_value(row, ["bigChances"])
+            normalized.append(
+                {
+                    "tournament_id": tournament_id,
+                    "season_id": season_id,
+                    "team_sofascore_id": _safe_int((row.get("team") or {}).get("id") if isinstance(row.get("team"), dict) else 0),
+                    "expected_goals": round(float(expected_goals or 0.0), 3),
+                    "shots_on_target": round(float(shots_on_target or 0.0), 3),
+                    "big_chances": round(float(big_chances or 0.0), 3),
+                }
+            )
+        return normalized
+
+    async def get_event_odds_history(self, event_id: int) -> Optional[List[Dict[str, Any]]]:
+        payload = await self._request(f"/event/{event_id}/odds/1/all", ttl_seconds=300)
+        if payload is None:
+            return None
+        markets = payload.get("markets", []) if isinstance(payload, dict) else []
+        if not isinstance(markets, list):
+            return []
+        rows: List[Dict[str, Any]] = []
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            market_name = str(market.get("marketName") or market.get("name") or "Unknown")
+            choices = market.get("choices") if isinstance(market.get("choices"), list) else market.get("outcomes", [])
+            for outcome in choices if isinstance(choices, list) else []:
+                if not isinstance(outcome, dict):
+                    continue
+                outcome_name = str(outcome.get("name") or outcome.get("choice") or "Unknown")
+                current_odd = _safe_float(outcome.get("odds"), fallback=0.0)
+                if current_odd <= 0:
+                    current_odd = _safe_float(outcome.get("decimalValue"), fallback=0.0)
+                opening_odd = _safe_float(outcome.get("openingOdds"), fallback=0.0)
+                if opening_odd <= 0:
+                    opening_odd = _safe_float(outcome.get("initialOdds"), fallback=0.0)
+                if opening_odd <= 0:
+                    opening_odd = current_odd
+                movement_pct = ((opening_odd - current_odd) / opening_odd * 100.0) if opening_odd > 0 else 0.0
+                rows.append(
+                    {
+                        "event_id": event_id,
+                        "market_type": f"{market_name}:{outcome_name}",
+                        "opening_odd": round(float(opening_odd), 4),
+                        "current_odd": round(float(current_odd), 4),
+                        "movement_pct": round(float(movement_pct), 2),
+                    }
+                )
+        return rows
+
+    @staticmethod
     def _name_matches(left: str, right: str) -> bool:
         l_norm = _normalize_name(left)
         r_norm = _normalize_name(right)
@@ -1598,6 +1771,25 @@ async def populate_team_stats_for_match(match_id: str) -> Optional[Dict[str, Any
 
 async def get_team_recent_matches(sofascore_team_id: int, limit: int = 6) -> List[Dict[str, Any]]:
     return await _default_service.get_team_recent_matches(sofascore_team_id, limit=limit)
+
+
+async def get_team_halftime_statistics(
+    team_id: str,
+    sofascore_team_id: int,
+    season: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_team_halftime_statistics(team_id, sofascore_team_id, season=season)
+
+
+async def get_tournament_season_overall_statistics(
+    tournament_id: int,
+    season_id: int,
+) -> Optional[List[Dict[str, Any]]]:
+    return await _default_service.get_tournament_season_overall_statistics(tournament_id, season_id)
+
+
+async def get_event_odds_history(event_id: int) -> Optional[List[Dict[str, Any]]]:
+    return await _default_service.get_event_odds_history(event_id)
 
 
 async def get_match_injuries(sofascore_event_id: int) -> Optional[Dict[str, List[Dict[str, Any]]]]:

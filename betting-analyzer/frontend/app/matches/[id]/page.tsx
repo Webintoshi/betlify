@@ -132,6 +132,11 @@ function normalizeResult(value: unknown): "W" | "D" | "L" {
   return "L";
 }
 
+function toNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function TeamAvatar({ name }: { name: string }) {
   return (
     <div className="flex flex-col items-center gap-3">
@@ -149,13 +154,23 @@ function TeamAvatar({ name }: { name: string }) {
 
 export default function MatchDetailsPage() {
   const params = useParams<{ id: string }>();
-  const matchId = params.id;
+  const matchId = typeof params?.id === "string" ? params.id : "";
   const [data, setData] = useState<MatchAnalysisResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
   const [saved, setSaved] = useState<boolean>(false);
+  const [isClient, setIsClient] = useState<boolean>(false);
 
   useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  useEffect(() => {
+    if (!matchId) {
+      setLoading(false);
+      setError("Maç kimliği bulunamadı.");
+      return;
+    }
     const load = async () => {
       setLoading(true);
       setError("");
@@ -171,8 +186,11 @@ export default function MatchDetailsPage() {
     void load();
   }, [matchId]);
 
-  const criteriaScores = useMemo(() => data?.analysis.criteria_scores ?? {}, [data]);
-  const allMarkets = data?.ev.all_markets ?? [];
+  const criteriaScores = useMemo(() => data?.analysis?.criteria_scores ?? {}, [data]);
+  const allMarkets = useMemo(
+    () => (Array.isArray(data?.ev?.all_markets) ? data.ev.all_markets : []),
+    [data]
+  );
   const homeFormItems = useMemo(() => {
     const homeForm = data?.form?.home;
     if (Array.isArray(homeForm)) {
@@ -235,30 +253,30 @@ export default function MatchDetailsPage() {
   const homeAttackXg = useMemo(() => {
     const home = data?.xg?.home;
     if (typeof home === "number") {
-      return home;
+      return toNumber(home, 0);
     }
-    return home?.attack_xg ?? data?.xg?.legacy?.home ?? 0;
+    return toNumber(home?.attack_xg ?? data?.xg?.legacy?.home, 0);
   }, [data]);
   const homeDefenseXg = useMemo(() => {
     const home = data?.xg?.home;
     if (typeof home === "number") {
       return 0;
     }
-    return home?.defense_xg ?? 0;
+    return toNumber(home?.defense_xg, 0);
   }, [data]);
   const awayAttackXg = useMemo(() => {
     const away = data?.xg?.away;
     if (typeof away === "number") {
-      return away;
+      return toNumber(away, 0);
     }
-    return away?.attack_xg ?? data?.xg?.legacy?.away ?? 0;
+    return toNumber(away?.attack_xg ?? data?.xg?.legacy?.away, 0);
   }, [data]);
   const awayDefenseXg = useMemo(() => {
     const away = data?.xg?.away;
     if (typeof away === "number") {
       return 0;
     }
-    return away?.defense_xg ?? 0;
+    return toNumber(away?.defense_xg, 0);
   }, [data]);
 
   const handleAddCoupon = () => {
@@ -278,7 +296,7 @@ export default function MatchDetailsPage() {
     window.setTimeout(() => setSaved(false), 1800);
   };
 
-  if (loading) {
+  if (!isClient || loading) {
     return (
       <section className="flex items-center justify-center min-h-[60vh]">
         <div className="flex flex-col items-center gap-4">
@@ -378,14 +396,14 @@ export default function MatchDetailsPage() {
               <div className="flex items-center justify-between">
                 <CardTitle>Güven Skoru</CardTitle>
                 <span className="text-2xl font-bold text-foreground-primary">
-                  {toPercent(data.analysis.confidence_score, 0)}
+                  {toPercent(toNumber(data.analysis?.confidence_score, 0), 0)}
                 </span>
               </div>
             </CardHeader>
             <CardContent>
               <Progress 
-                value={data.analysis.confidence_score}
-                variant={data.analysis.confidence_score >= 70 ? "success" : data.analysis.confidence_score >= 50 ? "warning" : "error"}
+                value={toNumber(data.analysis?.confidence_score, 0)}
+                variant={toNumber(data.analysis?.confidence_score, 0) >= 70 ? "success" : toNumber(data.analysis?.confidence_score, 0) >= 50 ? "warning" : "error"}
                 size="lg"
                 showValue
               />
@@ -490,22 +508,22 @@ export default function MatchDetailsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
-                    {allMarkets.slice(0, 16).map((market) => (
+                    {allMarkets.slice(0, 16).map((market, index) => (
                       <tr 
-                        key={`${market.market_type}-${market.predicted_outcome}`}
+                        key={`${market.market_type ?? market.market ?? "market"}-${market.predicted_outcome ?? index}`}
                         className={cn(
                           "hover:bg-white/[0.02] transition-colors",
                           market.recommended && "bg-success/5"
                         )}
                       >
-                        <td className="py-3 px-2 text-foreground-secondary">{market.market_type}</td>
-                        <td className="py-3 px-2 text-foreground-muted">%{(market.probability * 100).toFixed(1)}</td>
-                        <td className="py-3 px-2 font-medium text-foreground-primary">{market.odd.toFixed(2)}</td>
+                        <td className="py-3 px-2 text-foreground-secondary">{market.market_type ?? market.market ?? "-"}</td>
+                        <td className="py-3 px-2 text-foreground-muted">%{(toNumber(market.probability, 0) * 100).toFixed(1)}</td>
+                        <td className="py-3 px-2 font-medium text-foreground-primary">{toNumber(market.odd, 0).toFixed(2)}</td>
                         <td className={cn(
                           "py-3 px-2 font-medium",
-                          market.ev_percentage >= 0 ? "text-success" : "text-error"
+                          toNumber(market.ev_percentage, 0) >= 0 ? "text-success" : "text-error"
                         )}>
-                          {market.ev_percentage >= 0 ? "+" : ""}{market.ev_percentage.toFixed(1)}%
+                          {toNumber(market.ev_percentage, 0) >= 0 ? "+" : ""}{toNumber(market.ev_percentage, 0).toFixed(1)}%
                         </td>
                         <td className="py-3 px-2 text-center">
                           {market.recommended ? (
@@ -530,10 +548,10 @@ export default function MatchDetailsPage() {
           <CardHeader>
             <CardTitle>H2H Son 5 Maç</CardTitle>
             <CardDescription>
-              Oran: %{((data.h2h?.summary.ratio ?? 0.5) * 100).toFixed(1)} | 
-              Ev: {data.h2h?.summary.home_wins ?? 0} | 
-              Beraberlik: {data.h2h?.summary.draws ?? 0} | 
-              Deplasman: {data.h2h?.summary.away_wins ?? 0}
+              Oran: %{(toNumber(data.h2h?.summary?.ratio, 0.5) * 100).toFixed(1)} | 
+              Ev: {toNumber(data.h2h?.summary?.home_wins, 0)} | 
+              Beraberlik: {toNumber(data.h2h?.summary?.draws, 0)} | 
+              Deplasman: {toNumber(data.h2h?.summary?.away_wins, 0)}
             </CardDescription>
           </CardHeader>
           <CardContent>

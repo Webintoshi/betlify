@@ -270,7 +270,7 @@ class BettingScheduler:
         try:
             result = (
                 self.supabase.table("matches")
-                .select("id,match_date,status")
+                .select("id,match_date,status,home_team_id,away_team_id,season")
                 .gte("match_date", f"{today}T00:00:00")
                 .lte("match_date", f"{today}T23:59:59")
                 .in_("status", ["scheduled", "live", "finished"])
@@ -284,6 +284,7 @@ class BettingScheduler:
 
         processed = 0
         updated_teams = 0
+        updated_ht_stats = 0
         for row in matches:
             match_id = str(row.get("id") or "")
             if not match_id:
@@ -298,10 +299,36 @@ class BettingScheduler:
                 updated_teams += 1
             if int(away_info.get("updated_rows", 0) or 0) > 0:
                 updated_teams += 1
+            mapping = await self.sofascore._resolve_sofascore_team_ids_for_match(match_id)
+            if isinstance(mapping, dict):
+                home_sofa_id = _safe_int(mapping.get("home_sofascore_id"))
+                away_sofa_id = _safe_int(mapping.get("away_sofascore_id"))
+                season = str(row.get("season") or DEFAULT_SEASON)
+                if home_sofa_id > 0:
+                    ht_row = await self.sofascore.get_team_halftime_statistics(
+                        team_id=str(row.get("home_team_id") or ""),
+                        sofascore_team_id=home_sofa_id,
+                        season=season,
+                    )
+                    if ht_row:
+                        updated_ht_stats += 1
+                if away_sofa_id > 0:
+                    ht_row = await self.sofascore.get_team_halftime_statistics(
+                        team_id=str(row.get("away_team_id") or ""),
+                        sofascore_team_id=away_sofa_id,
+                        season=season,
+                    )
+                    if ht_row:
+                        updated_ht_stats += 1
             await asyncio.sleep(2)
 
-        logger.info("Gunluk history team_stats gorevi tamamlandi. match=%s teams=%s", processed, updated_teams)
-        return {"processed_matches": processed, "updated_teams": updated_teams}
+        logger.info(
+            "Gunluk history team_stats gorevi tamamlandi. match=%s teams=%s ht_stats=%s",
+            processed,
+            updated_teams,
+            updated_ht_stats,
+        )
+        return {"processed_matches": processed, "updated_teams": updated_teams, "updated_ht_stats": updated_ht_stats}
 
     async def refresh_today_injuries_and_h2h(self) -> Dict[str, Any]:
         if self.supabase is None:

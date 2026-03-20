@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 import uvicorn
@@ -16,7 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
-from analyzer import analyze_match
+from analyzer import (
+    analyze_match,
+    calculate_all_market_probabilities,
+    calculate_halftime_lambdas,
+    calculate_lambdas,
+    rho_fit,
+)
 from api_football import get_service as get_api_service
 from config import TRACKED_LEAGUE_IDS
 from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
@@ -492,6 +498,31 @@ def _avg_stat(rows: List[Dict[str, Any]], key: str, limit: int = 10) -> float:
     return round(sum(values) / len(values), 3)
 
 
+def _fetch_ht_ratios(
+    client: Client,
+    home_team_id: str,
+    away_team_id: str,
+    season: Optional[str],
+) -> Dict[str, float]:
+    default = {"home": 0.42, "away": 0.40}
+    try:
+        query = client.table("ht_stats").select("team_id,ht_goals_ratio,season").in_("team_id", [home_team_id, away_team_id])
+        if season:
+            query = query.eq("season", str(season))
+        result = query.execute()
+    except Exception:
+        return default
+
+    rows = result.data or []
+    by_team = {str(row.get("team_id")): row for row in rows if row.get("team_id")}
+    home_ratio = float(by_team.get(home_team_id, {}).get("ht_goals_ratio", default["home"]) or default["home"])
+    away_ratio = float(by_team.get(away_team_id, {}).get("ht_goals_ratio", default["away"]) or default["away"])
+    return {
+        "home": max(0.25, min(0.6, home_ratio)),
+        "away": max(0.25, min(0.6, away_ratio)),
+    }
+
+
 def _flatten_injuries(
     injuries_by_side: Dict[str, List[Dict[str, Any]]],
     *,
@@ -716,6 +747,11 @@ def _build_match_context(
         return sum(values) / len(values) if values else 0.0
 
     home_form = avg(home_stats, "form_last6")
+    away_form = avg(away_stats, "form_last6")
+    home_goals_for = avg(home_stats, "goals_scored")
+    home_goals_against = avg(home_stats, "goals_conceded")
+    away_goals_for = avg(away_stats, "goals_scored")
+    away_goals_against = avg(away_stats, "goals_conceded")
     home_xg_for = avg(home_stats, "xg_for")
     home_xg_against = avg(home_stats, "xg_against")
     away_xg_for = avg(away_stats, "xg_for")
@@ -745,16 +781,41 @@ def _build_match_context(
         else _h2h_points_ratio(h2h_rows, home_api_id)
     )
     weather_score = float(weather_payload.get("weather_score", 50.0)) if isinstance(weather_payload, dict) else 50.0
+    opening_odd = odds.get("MS1")
+    closing_odd = odds.get("MS1")
+    odds_movement = 0.0
+    if opening_odd and closing_odd and float(opening_odd) > 0:
+        odds_movement = max(
+            -1.0,
+            min(1.0, ((float(opening_odd) - float(closing_odd)) / float(opening_odd)) * 5.0),
+        )
+    squad_availability = max(0.0, min(1.0, 1.0 - (missing_players * 0.08) - (key_absences * 0.12)))
 
     return {
         "form_points_last6": max(0.0, min(18.0, home_form * 18.0)),
+        "home_form_score": max(0.0, min(1.0, home_form)),
+        "away_form_score": max(0.0, min(1.0, away_form)),
+        "home_attack": max(0.05, home_goals_for),
+        "home_defense": max(0.05, home_goals_against),
+        "away_attack": max(0.05, away_goals_for),
+        "away_defense": max(0.05, away_goals_against),
+        "home_attack_xg": max(0.05, home_xg_for),
+        "home_defense_xg": max(0.05, home_xg_against),
+        "away_attack_xg": max(0.05, away_xg_for),
+        "away_defense_xg": max(0.05, away_xg_against),
+        "league_avg_goals": 1.35,
+        "home_advantage": 1.15,
+        "ht_home_ratio": float(match_row.get("ht_home_ratio", 0.42) or 0.42),
+        "ht_away_ratio": float(match_row.get("ht_away_ratio", 0.40) or 0.40),
         "xg_diff_last6": (home_xg_for - home_xg_against) - (away_xg_for - away_xg_against),
         "missing_players": float(missing_players),
         "key_absences": float(key_absences),
+        "squad_availability": squad_availability,
         "xg_rolling_diff_10": home_xg_for - away_xg_for,
         "market_value_delta_pct": market_value_delta_pct,
-        "opening_odd": odds.get("MS1"),
-        "closing_odd": odds.get("MS1"),
+        "opening_odd": opening_odd,
+        "closing_odd": closing_odd,
+        "odds_movement": odds_movement,
         "h2h_points_ratio": h2h_ratio,
         "h2h_ratio": h2h_ratio,
         "h2h_summary": h2h_summary or {"ratio": h2h_ratio},
@@ -790,45 +851,72 @@ def _build_match_context(
     }
 
 
-def _build_market_probabilities(confidence_score: float, context: Dict[str, Any]) -> Dict[str, float]:
-    base_prob = max(0.2, min(0.75, confidence_score / 100.0))
-    draw_prob = max(0.1, min(0.35, 1.0 - base_prob))
-    away_prob = max(0.1, 1.0 - (base_prob + draw_prob))
-    over25 = max(0.2, min(0.8, 0.5 + (float(context.get("xg_diff_last6", 0.0)) / 10.0)))
-    btts_yes = max(0.2, min(0.8, 0.45 + (float(context.get("xg_rolling_diff_10", 0.0)) / 8.0)))
-
-    probabilities = {
-        "MS1": base_prob,
-        "MSX": draw_prob,
-        "MS2": away_prob,
-        "IY1": max(0.15, base_prob - 0.1),
-        "IYX": max(0.15, draw_prob),
-        "IY2": max(0.1, away_prob - 0.05),
-        "MS_O2.5": over25,
-        "MS_U2.5": 1.0 - over25,
-        "KG_VAR": btts_yes,
-        "KG_YOK": 1.0 - btts_yes,
-        "HCP_-1": max(0.1, base_prob - 0.12),
-        "HCP_-1.5": max(0.05, base_prob - 0.18),
-        "HCP_+1": max(0.3, 1.0 - away_prob),
-        "HCP_+1.5": max(0.35, 1.0 - away_prob + 0.05),
+def _build_market_probabilities(confidence_score: float, context: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
+    _ = confidence_score
+    lambda_home, lambda_away = calculate_lambdas(
+        home_attack=float(context.get("home_attack", 1.2) or 1.2),
+        home_defense=float(context.get("home_defense", 1.1) or 1.1),
+        away_attack=float(context.get("away_attack", 1.1) or 1.1),
+        away_defense=float(context.get("away_defense", 1.2) or 1.2),
+        league_avg_goals=float(context.get("league_avg_goals", 1.35) or 1.35),
+        home_advantage=float(context.get("home_advantage", 1.15) or 1.15),
+        home_xg=float(context.get("home_attack_xg", 1.2) or 1.2),
+        away_xg=float(context.get("away_attack_xg", 1.1) or 1.1),
+        xg_weight=0.4,
+    )
+    ht_lambda_home, ht_lambda_away = calculate_halftime_lambdas(
+        lambda_home,
+        lambda_away,
+        ht_home_ratio=float(context.get("ht_home_ratio", 0.42) or 0.42),
+        ht_away_ratio=float(context.get("ht_away_ratio", 0.40) or 0.40),
+    )
+    rho = rho_fit(initial_rho=-0.10)
+    probabilities_raw = calculate_all_market_probabilities(
+        lambda_home=lambda_home,
+        lambda_away=lambda_away,
+        ht_lambda_home=ht_lambda_home,
+        ht_lambda_away=ht_lambda_away,
+        rho=rho,
+    )
+    probabilities = {market: float(probabilities_raw.get(market, 0.5)) for market in SUPPORTED_MARKETS}
+    lambda_payload = {
+        "home": round(lambda_home, 4),
+        "away": round(lambda_away, 4),
+        "ht_home": round(ht_lambda_home, 4),
+        "ht_away": round(ht_lambda_away, 4),
+        "rho": round(float(rho), 4),
     }
-    for line in ["0.5", "1.5", "2.5", "3.5"]:
-        over_key_ft = f"MS_O{line}"
-        under_key_ft = f"MS_U{line}"
-        over_key_ht = f"IY_O{line}"
-        under_key_ht = f"IY_U{line}"
-        if over_key_ft not in probabilities:
-            base = max(0.15, min(0.85, over25 - (float(line) - 2.5) * 0.12))
-            probabilities[over_key_ft] = base
-            probabilities[under_key_ft] = 1.0 - base
-        ht_base = max(0.1, min(0.8, probabilities[over_key_ft] - 0.18))
-        probabilities[over_key_ht] = ht_base
-        probabilities[under_key_ht] = 1.0 - ht_base
-    return {market: probabilities.get(market, 0.5) for market in SUPPORTED_MARKETS}
+    return probabilities, lambda_payload
 
 
-def _save_predictions(client: Client, match_id: str, ev_result: Dict[str, Any]) -> None:
+def _save_market_probabilities(
+    client: Client,
+    match_id: str,
+    market_probabilities: Mapping[str, float],
+    lambda_payload: Mapping[str, float],
+) -> None:
+    for market, probability in market_probabilities.items():
+        row = {
+            "match_id": match_id,
+            "market": market,
+            "probability": float(probability),
+            "lambda_home": float(lambda_payload.get("home", 0.0) or 0.0),
+            "lambda_away": float(lambda_payload.get("away", 0.0) or 0.0),
+            "model_version": "dixon-coles-v1",
+        }
+        try:
+            client.table("market_probabilities").upsert(row, on_conflict="match_id,market").execute()
+        except Exception:
+            # Table might not exist yet before migration is applied.
+            break
+
+
+def _save_predictions(
+    client: Client,
+    match_id: str,
+    ev_result: Dict[str, Any],
+    lambda_payload: Optional[Mapping[str, float]] = None,
+) -> None:
     best = ev_result.get("best_market")
     if not best:
         return
@@ -839,20 +927,40 @@ def _save_predictions(client: Client, match_id: str, ev_result: Dict[str, Any]) 
         "confidence_score": ev_result["confidence_score"],
         "ev_percentage": best["ev_percentage"],
         "recommended": bool(best["recommended"]),
+        "kelly_pct": float(best.get("kelly_pct", 0.0) or 0.0),
+        "lambda_home": float((lambda_payload or {}).get("home", 0.0) or 0.0),
+        "lambda_away": float((lambda_payload or {}).get("away", 0.0) or 0.0),
+        "ht_lambda_home": float((lambda_payload or {}).get("ht_home", 0.0) or 0.0),
+        "ht_lambda_away": float((lambda_payload or {}).get("ht_away", 0.0) or 0.0),
     }
     try:
-        existing = (
-            client.table("predictions")
-            .select("id")
-            .eq("match_id", match_id)
-            .eq("market_type", payload["market_type"])
-            .limit(1)
-            .execute()
-        )
-        if existing.data:
-            client.table("predictions").update(payload).eq("id", existing.data[0]["id"]).execute()
-        else:
-            client.table("predictions").insert(payload).execute()
+        try:
+            existing = (
+                client.table("predictions")
+                .select("id")
+                .eq("match_id", match_id)
+                .eq("market_type", payload["market_type"])
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                client.table("predictions").update(payload).eq("id", existing.data[0]["id"]).execute()
+            else:
+                client.table("predictions").insert(payload).execute()
+        except Exception:
+            fallback = {k: v for k, v in payload.items() if k not in {"kelly_pct", "lambda_home", "lambda_away", "ht_lambda_home", "ht_lambda_away"}}
+            existing = (
+                client.table("predictions")
+                .select("id")
+                .eq("match_id", match_id)
+                .eq("market_type", fallback["market_type"])
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                client.table("predictions").update(fallback).eq("id", existing.data[0]["id"]).execute()
+            else:
+                client.table("predictions").insert(fallback).execute()
         best_market_name = str(best.get("market_type") or "")
         client.table("matches").update(
             {
@@ -932,11 +1040,22 @@ async def _run_match_analysis(
                 "home": sofa_injuries.get("home", []) or [],
                 "away": sofa_injuries.get("away", []) or [],
             }
+        await sofascore.get_event_odds_history(sofascore_match_id)
 
     if home_sofascore_id > 0:
         home_recent_form = await sofascore.get_team_recent_matches(home_sofascore_id, limit=6)
+        await sofascore.get_team_halftime_statistics(
+            team_id=home_team_id,
+            sofascore_team_id=home_sofascore_id,
+            season=str(match_row.get("season") or ""),
+        )
     if away_sofascore_id > 0:
         away_recent_form = await sofascore.get_team_recent_matches(away_sofascore_id, limit=6)
+        await sofascore.get_team_halftime_statistics(
+            team_id=away_team_id,
+            sofascore_team_id=away_sofascore_id,
+            season=str(match_row.get("season") or ""),
+        )
 
     if home_sofascore_id > 0 and away_sofascore_id > 0:
         pair_h2h = await sofascore.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=5)
@@ -1043,6 +1162,15 @@ async def _run_match_analysis(
             str(match_row["away_team_id"]),
         )
 
+    ht_ratios = _fetch_ht_ratios(
+        client,
+        home_team_id=str(match_row["home_team_id"]),
+        away_team_id=str(match_row["away_team_id"]),
+        season=str(match_row.get("season") or ""),
+    )
+    match_row["ht_home_ratio"] = ht_ratios["home"]
+    match_row["ht_away_ratio"] = ht_ratios["away"]
+
     live_odds = await odds_scraper.get_odds_for_match(resolved_match_id)
     stored_odds = _fetch_odds(client, resolved_match_id)
     odds = {**stored_odds, **live_odds}
@@ -1084,7 +1212,7 @@ async def _run_match_analysis(
         context["h2h_matches"] = h2h_rows
     analysis = analyze_match(context, confidence_threshold=confidence_threshold)
 
-    probabilities = _build_market_probabilities(analysis["confidence_score"], context)
+    probabilities, lambda_payload = _build_market_probabilities(analysis["confidence_score"], context)
     odd_map = {
         market: float(odd)
         for market, odd in odds.items()
@@ -1096,13 +1224,27 @@ async def _run_match_analysis(
         confidence_score=analysis["confidence_score"],
         confidence_threshold=confidence_threshold,
     )
-    _save_predictions(client, resolved_match_id, ev_result)
+    _save_market_probabilities(client, resolved_match_id, probabilities, lambda_payload)
+    _save_predictions(client, resolved_match_id, ev_result, lambda_payload=lambda_payload)
     odds_scraper.save_ev_rows(match_id=resolved_match_id, ev_result=ev_result)
+    best_market = ev_result.get("best_market") or {}
     payload: Dict[str, Any] = {
         "match_id": resolved_match_id,
+        "lambda": {
+            "home": lambda_payload.get("home", 0.0),
+            "away": lambda_payload.get("away", 0.0),
+            "ht_home": lambda_payload.get("ht_home", 0.0),
+            "ht_away": lambda_payload.get("ht_away", 0.0),
+        },
+        "confidence_score": analysis["confidence_score"],
         "analysis": analysis,
         "ev": ev_result,
-        "recommended_market": ev_result.get("best_market"),
+        "recommended_market": {
+            **best_market,
+            "market": best_market.get("market") or best_market.get("market_type"),
+        }
+        if best_market
+        else None,
     }
     if include_details:
         home_team = team_rows.get(str(match_row["home_team_id"]), {})
@@ -1709,7 +1851,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
             "pi_rating_delta": 0.0,
         }
         analysis = analyze_match(context, confidence_threshold=min_confidence)
-        probabilities = _build_market_probabilities(analysis["confidence_score"], context)
+        probabilities, _lambda_payload = _build_market_probabilities(analysis["confidence_score"], context)
         market_odds = {
             market: float(odd)
             for market, odd in odds.items()
