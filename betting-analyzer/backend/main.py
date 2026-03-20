@@ -31,6 +31,7 @@ from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
 from pi_rating import calculate_pi_ratings
 from proxy_pool import ProxyPool, mask_proxy
 from scheduler import BettingScheduler
+from services.analysis_engine import run_analysis as run_divine_analysis
 from services.odds_scraper import get_service as get_odds_scraper_service
 from services.sofascore_collector import get_service as get_sofascore_collector_service
 from sofascore import get_service as get_sofascore_service, stable_uuid
@@ -972,6 +973,172 @@ def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
     return mapped
 
 
+def _fetch_bookmaker_odds_entries(client: Client, match_id: str) -> List[Dict[str, Any]]:
+    try:
+        rows = (
+            client.table("odds_history")
+            .select("bookmaker,market_type,current_odd,closing_odd,opening_odd,recorded_at")
+            .eq("match_id", match_id)
+            .order("recorded_at", desc=True)
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        bookmaker = str(row.get("bookmaker") or "unknown").strip().lower() or "unknown"
+        market = _normalize_market_key(str(row.get("market_type") or ""))
+        if not market:
+            continue
+        odd_raw = row.get("current_odd") or row.get("closing_odd") or row.get("opening_odd")
+        try:
+            odd = float(odd_raw)
+        except (TypeError, ValueError):
+            continue
+        if odd <= 1.0:
+            continue
+        grouped.setdefault(bookmaker, {"book": bookmaker})
+        if market not in grouped[bookmaker]:
+            grouped[bookmaker][market] = round(odd, 4)
+
+    if grouped:
+        return list(grouped.values())
+
+    fallback = _fetch_odds(client, match_id)
+    if not fallback:
+        return []
+    return [{"book": "internal", **{k: float(v) for k, v in fallback.items() if float(v) > 1.0}}]
+
+
+def _build_engine_match_data(
+    *,
+    match_id: str,
+    home_stats: List[Dict[str, Any]],
+    away_stats: List[Dict[str, Any]],
+    home_form_payload: Dict[str, Any],
+    away_form_payload: Dict[str, Any],
+    h2h_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    home_avg_goals_for = _avg_stat(home_stats, "goals_scored", limit=10) or 1.4
+    away_avg_goals_for = _avg_stat(away_stats, "goals_scored", limit=10) or 1.1
+    home_avg_goals_against = _avg_stat(home_stats, "goals_conceded", limit=10) or 1.2
+    away_avg_goals_against = _avg_stat(away_stats, "goals_conceded", limit=10) or 1.3
+    home_avg_xg_for = _avg_stat(home_stats, "xg_for", limit=10) or home_avg_goals_for
+    away_avg_xg_for = _avg_stat(away_stats, "xg_for", limit=10) or away_avg_goals_for
+    home_avg_xg_against = _avg_stat(home_stats, "xg_against", limit=10) or home_avg_goals_against
+    away_avg_xg_against = _avg_stat(away_stats, "xg_against", limit=10) or away_avg_goals_against
+
+    if h2h_rows:
+        avg_h2h_home = round(sum(float(row.get("home_goals", 0) or 0) for row in h2h_rows[:10]) / min(len(h2h_rows[:10]), 10), 3)
+        avg_h2h_away = round(sum(float(row.get("away_goals", 0) or 0) for row in h2h_rows[:10]) / min(len(h2h_rows[:10]), 10), 3)
+    else:
+        avg_h2h_home = home_avg_goals_for
+        avg_h2h_away = away_avg_goals_for
+
+    return {
+        "match_id": match_id,
+        "home_team_stats": {
+            "last6": home_form_payload.get("last6", []),
+            "avg_xg_for": home_avg_xg_for,
+            "avg_xg_against": home_avg_xg_against,
+            "avg_goals_for": home_avg_goals_for,
+            "avg_goals_against": home_avg_goals_against,
+            "home_avg_goals_for": home_avg_goals_for,
+        },
+        "away_team_stats": {
+            "last6": away_form_payload.get("last6", []),
+            "avg_xg_for": away_avg_xg_for,
+            "avg_xg_against": away_avg_xg_against,
+            "avg_goals_for": away_avg_goals_for,
+            "avg_goals_against": away_avg_goals_against,
+            "away_avg_goals_for": away_avg_goals_for,
+        },
+        "h2h": {
+            "avg_home_goals": avg_h2h_home,
+            "avg_away_goals": avg_h2h_away,
+            "matches": h2h_rows[:5],
+        },
+    }
+
+
+def _convert_engine_markets(engine_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    converted: List[Dict[str, Any]] = []
+    for row in engine_rows:
+        market = str(row.get("market") or row.get("market_type") or "").strip()
+        if not market:
+            continue
+        try:
+            probability = float(row.get("probability", 0.0) or 0.0)
+            odd = float(row.get("odd", 0.0) or 0.0)
+            ev = float(row.get("ev", 0.0) or 0.0)
+            kelly = float(row.get("kelly_pct", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        converted.append(
+            {
+                "market": market,
+                "market_type": market,
+                "predicted_outcome": market,
+                "probability": round(probability, 6),
+                "odd": round(odd, 4),
+                "odd_source": "bookmaker",
+                "ev": round(ev, 4),
+                "ev_percentage": round(ev * 100.0, 2),
+                "recommended": bool(row.get("recommended", False)),
+                "suspicious_high_ev": bool(row.get("suspicious_high_ev", False)),
+                "kelly_pct": round(kelly, 2),
+                "kelly_note": (
+                    f"Bankroll'unun %{round(kelly, 2)} kadarini oynayin"
+                    if kelly > 0
+                    else "Oynama"
+                ),
+                "reject_reason": row.get("reject_reason"),
+            }
+        )
+    return sorted(converted, key=lambda item: item["ev"], reverse=True)
+
+
+def _build_ev_result_from_engine(
+    *,
+    engine_result: Dict[str, Any],
+    confidence_threshold: float,
+) -> Dict[str, Any]:
+    engine_markets = engine_result.get("ev", {}) if isinstance(engine_result.get("ev"), dict) else {}
+    all_markets = _convert_engine_markets(engine_markets.get("all_markets", []) or [])
+
+    confidence_score = float(engine_result.get("confidence_score", 0.0) or 0.0)
+    best_market: Optional[Dict[str, Any]] = None
+    preferred = engine_result.get("recommended_market")
+    if isinstance(preferred, dict) and preferred:
+        preferred_market = str(preferred.get("market") or preferred.get("market_type") or "")
+        best_market = next((row for row in all_markets if row.get("market_type") == preferred_market), None)
+    if best_market is None and all_markets:
+        best_market = all_markets[0]
+
+    any_recommended = any(bool(item.get("recommended")) for item in all_markets)
+    effective_recommended = any_recommended and (confidence_score >= float(confidence_threshold))
+
+    if best_market is not None:
+        best_market = {
+            **best_market,
+            "recommended": bool(best_market.get("recommended", False) and confidence_score >= float(confidence_threshold)),
+            "confidence_gate_passed": bool(confidence_score >= float(confidence_threshold)),
+        }
+
+    return {
+        "confidence_score": round(confidence_score, 2),
+        "confidence_threshold": float(confidence_threshold),
+        "recommended": bool(effective_recommended),
+        "recommended_by_ev_only": bool(any_recommended),
+        "best_market": best_market,
+        "all_markets": all_markets,
+    }
+
+
 def _competition_type_and_stage(league_name: str) -> Tuple[str, str]:
     value = league_name.lower()
     stage = "regular"
@@ -1511,20 +1678,70 @@ async def _run_match_analysis(
         context["h2h_points_ratio"] = float(h2h_summary.get("ratio", 0.5) or 0.5)
     if h2h_rows:
         context["h2h_matches"] = h2h_rows
-    analysis = analyze_match(context, confidence_threshold=confidence_threshold)
+    home_form_payload = _build_form_payload(recent_matches=home_recent_form, fallback_stats=home_stats)
+    away_form_payload = _build_form_payload(recent_matches=away_recent_form, fallback_stats=away_stats)
+    analysis_legacy = analyze_match(context, confidence_threshold=confidence_threshold)
 
-    probabilities, lambda_payload = _build_market_probabilities(analysis["confidence_score"], context)
+    bookmaker_odds = _fetch_bookmaker_odds_entries(client, resolved_match_id)
+    if live_odds:
+        bookmaker_odds.append(
+            {
+                "book": "live",
+                **{
+                    market: float(odd)
+                    for market, odd in live_odds.items()
+                    if market in SUPPORTED_MARKETS and float(odd) > 1.0
+                },
+            }
+        )
+
+    engine_match_data = _build_engine_match_data(
+        match_id=resolved_match_id,
+        home_stats=home_stats,
+        away_stats=away_stats,
+        home_form_payload=home_form_payload,
+        away_form_payload=away_form_payload,
+        h2h_rows=h2h_rows,
+    )
+    engine_result = run_divine_analysis(engine_match_data, bookmaker_odds)
+    engine_confidence = float(engine_result.get("confidence_score", analysis_legacy.get("confidence_score", 0.0)) or 0.0)
+
+    probabilities = {
+        str(market): float(probability)
+        for market, probability in (engine_result.get("probabilities", {}) or {}).items()
+    }
+    lambda_payload = {
+        "home": float((engine_result.get("lambda", {}) or {}).get("home", 0.0) or 0.0),
+        "away": float((engine_result.get("lambda", {}) or {}).get("away", 0.0) or 0.0),
+        "ht_home": float((engine_result.get("lambda", {}) or {}).get("ht_home", 0.0) or 0.0),
+        "ht_away": float((engine_result.get("lambda", {}) or {}).get("ht_away", 0.0) or 0.0),
+    }
+    if not probabilities:
+        probabilities, lambda_payload = _build_market_probabilities(engine_confidence, context)
+
     odd_map = {
         market: float(odd)
         for market, odd in odds.items()
         if market in SUPPORTED_MARKETS and float(odd) > 0
     }
-    ev_result = evaluate_markets(
-        market_probabilities=probabilities,
-        market_odds=odd_map,
-        confidence_score=analysis["confidence_score"],
+    ev_result = _build_ev_result_from_engine(
+        engine_result=engine_result,
         confidence_threshold=confidence_threshold,
     )
+    if not ev_result.get("all_markets"):
+        ev_result = evaluate_markets(
+            market_probabilities=probabilities,
+            market_odds=odd_map,
+            confidence_score=engine_confidence,
+            confidence_threshold=confidence_threshold,
+        )
+
+    analysis = {
+        **analysis_legacy,
+        "confidence_score": round(engine_confidence, 2),
+        "recommended": bool(ev_result.get("recommended", False)),
+        "engine": str((engine_result.get("meta", {}) or {}).get("model", "Dixon-Coles v2.0")),
+    }
     _save_market_probabilities(client, resolved_match_id, probabilities, lambda_payload)
     _save_predictions(client, resolved_match_id, ev_result, lambda_payload=lambda_payload)
     odds_scraper.save_ev_rows(match_id=resolved_match_id, ev_result=ev_result)
@@ -1537,7 +1754,7 @@ async def _run_match_analysis(
             "ht_home": lambda_payload.get("ht_home", 0.0),
             "ht_away": lambda_payload.get("ht_away", 0.0),
         },
-        "confidence_score": analysis["confidence_score"],
+        "confidence_score": round(engine_confidence, 2),
         "analysis": analysis,
         "ev": ev_result,
         "recommended_market": {
@@ -1546,6 +1763,7 @@ async def _run_match_analysis(
         }
         if best_market
         else None,
+        "meta": engine_result.get("meta", {"model": "Dixon-Coles v2.0"}),
     }
     if include_details:
         home_team = team_rows.get(str(match_row["home_team_id"]), {})
@@ -1566,8 +1784,6 @@ async def _run_match_analysis(
                 "country": away_team.get("country"),
             },
         }
-        home_form_payload = _build_form_payload(recent_matches=home_recent_form, fallback_stats=home_stats)
-        away_form_payload = _build_form_payload(recent_matches=away_recent_form, fallback_stats=away_stats)
         home_attack_xg = _avg_stat(home_stats, "xg_for", limit=10)
         home_defense_xg = _avg_stat(home_stats, "xg_against", limit=10)
         away_attack_xg = _avg_stat(away_stats, "xg_for", limit=10)
