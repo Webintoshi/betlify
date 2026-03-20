@@ -6,6 +6,7 @@ from config_markets import MIN_CONFIDENCE_SCORE, VALID_MARKETS
 from services.confidence import confidence_score
 from services.dixon_coles import compute_ht_probs, compute_match_probs
 from services.ev_engine import evaluate_market
+from services.market_calibration import calibrate_all
 from services.odds_processor import get_best_odd
 
 W_FORM = 0.25
@@ -84,19 +85,50 @@ def run_analysis(match_data: Dict[str, Any], bookmaker_odds: List[Dict[str, Any]
 
     ft_probs = compute_match_probs(lam_h, lam_a)
     ht_probs = compute_ht_probs(ht_lam_h, ht_lam_a)
-    all_probs = {**ft_probs, **ht_probs}
+    model_probs = {**ft_probs, **ht_probs}
 
-    conf, conf_reasons = confidence_score(match_data, all_probs, bookmaker_odds)
+    best_odds: Dict[str, float] = {}
+    for market in VALID_MARKETS:
+        odd = get_best_odd(market, bookmaker_odds)
+        if odd:
+            best_odds[market] = float(odd)
+
+    calibration = calibrate_all(model_probs, best_odds)
+
+    conf, conf_reasons = confidence_score(match_data, model_probs, bookmaker_odds)
 
     results: List[Dict[str, Any]] = []
     for market in VALID_MARKETS:
-        our_prob = all_probs.get(market)
-        if our_prob is None:
+        cal = calibration.get(market)
+        if not cal:
             continue
-        best_odd = get_best_odd(market, bookmaker_odds)
-        if best_odd is None:
+
+        if not bool(cal.get("is_valid", True)):
+            results.append(
+                {
+                    "market": market,
+                    "market_type": market,
+                    "predicted_outcome": market,
+                    "probability": cal.get("model_prob"),
+                    "odd": best_odds.get(market),
+                    "ev": None,
+                    "ev_pct": None,
+                    "kelly_pct": 0.0,
+                    "recommended": False,
+                    "reject_reason": cal.get("reject_reason"),
+                    "calibration": cal,
+                    "suspicious_high_ev": False,
+                }
+            )
             continue
-        evaluated = evaluate_market(market, float(our_prob), float(best_odd))
+
+        final_prob = cal.get("calibrated_prob")
+        best_odd = best_odds.get(market)
+        if final_prob is None or best_odd is None:
+            continue
+
+        evaluated = evaluate_market(market, float(final_prob), float(best_odd))
+        evaluated["calibration"] = cal
         results.append(evaluated)
 
     recommended = [item for item in results if bool(item.get("recommended"))]
@@ -125,9 +157,14 @@ def run_analysis(match_data: Dict[str, Any], bookmaker_odds: List[Dict[str, Any]
         },
         "recommended_market": best,
         "ev": {"all_markets": results},
-        "probabilities": all_probs,
+        "probabilities": model_probs,
+        "calibrated_probs": {
+            market: data.get("calibrated_prob")
+            for market, data in calibration.items()
+            if data.get("calibrated_prob") is not None
+        },
         "meta": {
-            "model": "Dixon-Coles v2.0",
+            "model": "Dixon-Coles + Market Calibration v2.1",
             "kelly_fraction": 0.25,
             "bookmakers_used": len(bookmaker_odds),
             "markets_analyzed": len(results),
