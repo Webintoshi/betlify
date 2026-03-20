@@ -124,6 +124,14 @@ function FormBadge({ result }: { result: "W" | "D" | "L" }) {
   );
 }
 
+function normalizeResult(value: unknown): "W" | "D" | "L" {
+  const token = String(value ?? "").toUpperCase();
+  if (token === "W" || token === "D") {
+    return token;
+  }
+  return "L";
+}
+
 function TeamAvatar({ name }: { name: string }) {
   return (
     <div className="flex flex-col items-center gap-3">
@@ -165,6 +173,93 @@ export default function MatchDetailsPage() {
 
   const criteriaScores = useMemo(() => data?.analysis.criteria_scores ?? {}, [data]);
   const allMarkets = data?.ev.all_markets ?? [];
+  const homeFormItems = useMemo(() => {
+    const homeForm = data?.form?.home;
+    if (Array.isArray(homeForm)) {
+      return homeForm.map((item) => ({ result: normalizeResult(item.result) }));
+    }
+    if (homeForm && typeof homeForm === "object" && Array.isArray(homeForm.last6)) {
+      return homeForm.last6.map((item) => ({ result: normalizeResult(item) }));
+    }
+    if (Array.isArray(data?.form_legacy?.home)) {
+      return data.form_legacy.home.map((item) => ({ result: normalizeResult(item.result) }));
+    }
+    return [];
+  }, [data]);
+  const awayFormItems = useMemo(() => {
+    const awayForm = data?.form?.away;
+    if (Array.isArray(awayForm)) {
+      return awayForm.map((item) => ({ result: normalizeResult(item.result) }));
+    }
+    if (awayForm && typeof awayForm === "object" && Array.isArray(awayForm.last6)) {
+      return awayForm.last6.map((item) => ({ result: normalizeResult(item) }));
+    }
+    if (Array.isArray(data?.form_legacy?.away)) {
+      return data.form_legacy.away.map((item) => ({ result: normalizeResult(item.result) }));
+    }
+    return [];
+  }, [data]);
+  const injuriesFlat = useMemo(() => {
+    if (Array.isArray(data?.injuries)) {
+      return data.injuries;
+    }
+    if (Array.isArray(data?.injuries_flat)) {
+      return data.injuries_flat;
+    }
+    if (data?.injuries && typeof data.injuries === "object") {
+      const homeRows = Array.isArray(data.injuries.home) ? data.injuries.home : [];
+      const awayRows = Array.isArray(data.injuries.away) ? data.injuries.away : [];
+      const home = homeRows.map((row) => ({
+        team_name: data.match?.home_team.name ?? "Ev Sahibi",
+        player: row.player_name,
+        reason: row.reason ?? "",
+        type: row.status ?? "injured"
+      }));
+      const away = awayRows.map((row) => ({
+        team_name: data.match?.away_team.name ?? "Deplasman",
+        player: row.player_name,
+        reason: row.reason ?? "",
+        type: row.status ?? "injured"
+      }));
+      return [...home, ...away];
+    }
+    return [];
+  }, [data]);
+  const h2hMatches = useMemo(() => {
+    const fromMatches = data?.h2h?.matches;
+    if (Array.isArray(fromMatches) && fromMatches.length > 0) {
+      return fromMatches;
+    }
+    return Array.isArray(data?.h2h?.last5) ? data.h2h.last5 : [];
+  }, [data]);
+  const homeAttackXg = useMemo(() => {
+    const home = data?.xg?.home;
+    if (typeof home === "number") {
+      return home;
+    }
+    return home?.attack_xg ?? data?.xg?.legacy?.home ?? 0;
+  }, [data]);
+  const homeDefenseXg = useMemo(() => {
+    const home = data?.xg?.home;
+    if (typeof home === "number") {
+      return 0;
+    }
+    return home?.defense_xg ?? 0;
+  }, [data]);
+  const awayAttackXg = useMemo(() => {
+    const away = data?.xg?.away;
+    if (typeof away === "number") {
+      return away;
+    }
+    return away?.attack_xg ?? data?.xg?.legacy?.away ?? 0;
+  }, [data]);
+  const awayDefenseXg = useMemo(() => {
+    const away = data?.xg?.away;
+    if (typeof away === "number") {
+      return 0;
+    }
+    return away?.defense_xg ?? 0;
+  }, [data]);
 
   const handleAddCoupon = () => {
     if (!data?.match || !data.recommended_market) {
@@ -306,7 +401,7 @@ export default function MatchDetailsPage() {
               <div>
                 <p className="text-xs text-foreground-muted mb-2">Ev Sahibi</p>
                 <div className="flex gap-2">
-                  {(data.form?.home ?? []).map((item, index) => (
+                  {homeFormItems.map((item, index) => (
                     <FormBadge key={`home-${index}`} result={item.result} />
                   ))}
                 </div>
@@ -314,7 +409,7 @@ export default function MatchDetailsPage() {
               <div>
                 <p className="text-xs text-foreground-muted mb-2">Deplasman</p>
                 <div className="flex gap-2">
-                  {(data.form?.away ?? []).map((item, index) => (
+                  {awayFormItems.map((item, index) => (
                     <FormBadge key={`away-${index}`} result={item.result} />
                   ))}
                 </div>
@@ -329,9 +424,9 @@ export default function MatchDetailsPage() {
               <CardDescription>Sakat ve cezalı oyuncular</CardDescription>
             </CardHeader>
             <CardContent>
-              {(data.injuries ?? []).length ? (
+              {injuriesFlat.length ? (
                 <ul className="space-y-2">
-                  {(data.injuries ?? []).slice(0, 8).map((injury, index) => (
+                  {injuriesFlat.slice(0, 8).map((injury, index) => (
                     <li
                       key={`${injury.player}-${index}`}
                       className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.02] border border-white/[0.04]"
@@ -443,14 +538,28 @@ export default function MatchDetailsPage() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {(data.h2h?.last5 ?? []).map((item, index) => {
+              {h2hMatches.map((item, index) => {
                 const raw = item as Record<string, unknown>;
                 const teams = (raw.teams as Record<string, unknown>) ?? {};
                 const goals = (raw.goals as Record<string, unknown>) ?? {};
-                const homeName = ((teams.home as Record<string, unknown>)?.name as string) ?? "Ev";
-                const awayName = ((teams.away as Record<string, unknown>)?.name as string) ?? "Dep";
-                const homeGoals = Number((goals.home as number | string | undefined) ?? 0);
-                const awayGoals = Number((goals.away as number | string | undefined) ?? 0);
+                const homeName =
+                  (raw.home_team as string | undefined) ??
+                  ((teams.home as Record<string, unknown>)?.name as string | undefined) ??
+                  "Ev";
+                const awayName =
+                  (raw.away_team as string | undefined) ??
+                  ((teams.away as Record<string, unknown>)?.name as string | undefined) ??
+                  "Dep";
+                const homeGoals = Number(
+                  (raw.home_goals as number | string | undefined) ??
+                    (goals.home as number | string | undefined) ??
+                    0
+                );
+                const awayGoals = Number(
+                  (raw.away_goals as number | string | undefined) ??
+                    (goals.away as number | string | undefined) ??
+                    0
+                );
                 return (
                   <div
                     key={index}
@@ -474,24 +583,26 @@ export default function MatchDetailsPage() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-foreground-secondary">{data.match.home_team.name}</span>
-                <span className="text-lg font-bold text-foreground-primary">{(data.xg?.home ?? 0).toFixed(2)}</span>
+                <span className="text-lg font-bold text-foreground-primary">{homeAttackXg.toFixed(2)}</span>
               </div>
               <Progress 
-                value={Math.min(100, (data.xg?.home ?? 0) * 30)} 
+                value={Math.min(100, homeAttackXg * 30)} 
                 variant="default"
                 size="lg"
               />
+              <p className="mt-2 text-xs text-foreground-muted">Defans xG: {homeDefenseXg.toFixed(2)}</p>
             </div>
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-foreground-secondary">{data.match.away_team.name}</span>
-                <span className="text-lg font-bold text-foreground-primary">{(data.xg?.away ?? 0).toFixed(2)}</span>
+                <span className="text-lg font-bold text-foreground-primary">{awayAttackXg.toFixed(2)}</span>
               </div>
               <Progress 
-                value={Math.min(100, (data.xg?.away ?? 0) * 30)} 
+                value={Math.min(100, awayAttackXg * 30)} 
                 variant="warning"
                 size="lg"
               />
+              <p className="mt-2 text-xs text-foreground-muted">Defans xG: {awayDefenseXg.toFixed(2)}</p>
             </div>
           </CardContent>
         </Card>

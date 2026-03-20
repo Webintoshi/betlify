@@ -143,6 +143,7 @@ async def _run_full_backfill() -> None:
             sofascore_by_date[date_str] = count
 
         daily_stats_result = await scheduler.populate_today_team_stats_history()
+        injuries_h2h_result = await scheduler.refresh_today_injuries_and_h2h()
         odds_refresh_result = await scheduler.refresh_sofascore_odds()
         weekly_stats_result = await scheduler.update_weekly_team_stats()
         pi_rating_result = await scheduler.refresh_pi_ratings()
@@ -151,6 +152,7 @@ async def _run_full_backfill() -> None:
             "fixtures": fixtures_result,
             "sofascore": {"total_saved": sofascore_total, "by_date": sofascore_by_date},
             "daily_team_stats": daily_stats_result,
+            "injuries_h2h": injuries_h2h_result,
             "odds_refresh": odds_refresh_result,
             "weekly_team_stats": weekly_stats_result,
             "pi_rating": pi_rating_result,
@@ -260,6 +262,92 @@ def _fetch_team_stats(client: Client, team_ids: List[str]) -> List[Dict[str, Any
         return []
 
 
+def _fetch_match_injuries(
+    client: Client,
+    match_id: str,
+    home_team_id: str,
+    away_team_id: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    try:
+        result = (
+            client.table("match_injuries")
+            .select("team_id,player_name,position,status,reason,expected_return,created_at")
+            .eq("match_id", match_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception:
+        return {"home": [], "away": []}
+
+    home_rows: List[Dict[str, Any]] = []
+    away_rows: List[Dict[str, Any]] = []
+    for row in result.data or []:
+        entry = {
+            "player_name": str(row.get("player_name") or ""),
+            "position": str(row.get("position") or ""),
+            "status": str(row.get("status") or "injured"),
+            "reason": str(row.get("reason") or ""),
+            "expected_return": str(row.get("expected_return") or ""),
+        }
+        team_id = str(row.get("team_id") or "")
+        if team_id == home_team_id:
+            home_rows.append(entry)
+        elif team_id == away_team_id:
+            away_rows.append(entry)
+    return {"home": home_rows, "away": away_rows}
+
+
+def _fetch_h2h_rows(client: Client, home_team_id: str, away_team_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    max_rows = max(1, limit)
+    try:
+        direct = (
+            client.table("h2h")
+            .select("match_date,home_goals,away_goals,league,sofascore_id,is_cup")
+            .eq("home_team_id", home_team_id)
+            .eq("away_team_id", away_team_id)
+            .order("match_date", desc=True)
+            .limit(max_rows)
+            .execute()
+        )
+        reverse = (
+            client.table("h2h")
+            .select("match_date,home_goals,away_goals,league,sofascore_id,is_cup")
+            .eq("home_team_id", away_team_id)
+            .eq("away_team_id", home_team_id)
+            .order("match_date", desc=True)
+            .limit(max_rows)
+            .execute()
+        )
+    except Exception:
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for row in direct.data or []:
+        normalized.append(
+            {
+                "match_date": row.get("match_date"),
+                "home_goals": int(row.get("home_goals", 0) or 0),
+                "away_goals": int(row.get("away_goals", 0) or 0),
+                "league": row.get("league"),
+                "sofascore_id": row.get("sofascore_id"),
+                "is_cup": bool(row.get("is_cup", False)),
+            }
+        )
+    for row in reverse.data or []:
+        normalized.append(
+            {
+                "match_date": row.get("match_date"),
+                "home_goals": int(row.get("away_goals", 0) or 0),
+                "away_goals": int(row.get("home_goals", 0) or 0),
+                "league": row.get("league"),
+                "sofascore_id": row.get("sofascore_id"),
+                "is_cup": bool(row.get("is_cup", False)),
+            }
+        )
+    normalized.sort(key=lambda item: str(item.get("match_date") or ""), reverse=True)
+    return normalized[:max_rows]
+
+
 def _team_xg_rolling_10(client: Client, team_id: str) -> float:
     try:
         result = (
@@ -324,6 +412,115 @@ def _team_form_sequence(rows: List[Dict[str, Any]], limit: int = 6) -> List[Dict
             }
         )
     return sequence
+
+
+def _form_score_from_results(results: List[str]) -> float:
+    if not results:
+        return 0.0
+    points = 0
+    for item in results[:6]:
+        flag = str(item).upper()
+        if flag == "W":
+            points += 3
+        elif flag == "D":
+            points += 1
+    return round(points / 18.0, 3)
+
+
+def _build_form_payload(
+    *,
+    recent_matches: List[Dict[str, Any]],
+    fallback_stats: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if recent_matches:
+        last6 = [str(item.get("result") or "D").upper() for item in recent_matches[:6]]
+        matches = [
+            {
+                "date": item.get("date"),
+                "home_team_name": item.get("home_team_name"),
+                "away_team_name": item.get("away_team_name"),
+                "home_goals": int(item.get("home_goals", 0) or 0),
+                "away_goals": int(item.get("away_goals", 0) or 0),
+                "result": str(item.get("result") or "D").upper(),
+                "is_home": bool(item.get("is_home", False)),
+            }
+            for item in recent_matches[:6]
+        ]
+        legacy = [
+            {
+                "result": str(item.get("result") or "D").upper(),
+                "goals_scored": (
+                    int(item.get("home_goals", 0) or 0)
+                    if bool(item.get("is_home", False))
+                    else int(item.get("away_goals", 0) or 0)
+                ),
+                "goals_conceded": (
+                    int(item.get("away_goals", 0) or 0)
+                    if bool(item.get("is_home", False))
+                    else int(item.get("home_goals", 0) or 0)
+                ),
+                "updated_at": item.get("date"),
+            }
+            for item in recent_matches[:6]
+        ]
+        return {
+            "last6": last6,
+            "score": _form_score_from_results(last6),
+            "matches": matches,
+            "legacy": legacy,
+        }
+
+    legacy = _team_form_sequence(fallback_stats, limit=6)
+    last6 = [str(item.get("result") or "D").upper() for item in legacy]
+    return {
+        "last6": last6,
+        "score": _form_score_from_results(last6),
+        "matches": [],
+        "legacy": legacy,
+    }
+
+
+def _avg_stat(rows: List[Dict[str, Any]], key: str, limit: int = 10) -> float:
+    values: List[float] = []
+    for row in rows[: max(1, limit)]:
+        try:
+            values.append(float(row.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 3)
+
+
+def _flatten_injuries(
+    injuries_by_side: Dict[str, List[Dict[str, Any]]],
+    *,
+    home_team_id: str,
+    away_team_id: str,
+    home_team_name: str,
+    away_team_name: str,
+) -> List[Dict[str, Any]]:
+    flat: List[Dict[str, Any]] = []
+    for side, team_id, team_name in [
+        ("home", home_team_id, home_team_name),
+        ("away", away_team_id, away_team_name),
+    ]:
+        for row in injuries_by_side.get(side, []) or []:
+            flat.append(
+                {
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "team_side": side,
+                    "player": row.get("player_name") or row.get("player"),
+                    "player_name": row.get("player_name") or row.get("player"),
+                    "position": row.get("position"),
+                    "status": row.get("status") or row.get("type") or "injured",
+                    "type": row.get("status") or row.get("type") or "injured",
+                    "reason": row.get("reason"),
+                    "expected_return": row.get("expected_return"),
+                }
+            )
+    return flat
 
 
 def _safe_iso_date(value: Any) -> str:
@@ -534,8 +731,8 @@ def _build_match_context(
             row
             for row in injuries
             if any(
-                token in str(row.get("reason", "")).lower()
-                for token in ["susp", "ceza", "kirmizi", "yellow suspension"]
+                token in f"{row.get('reason', '')} {row.get('status', '')} {row.get('type', '')}".lower()
+                for token in ["susp", "ceza", "kirmizi", "yellow suspension", "injur", "doubt"]
             )
         ]
     )
@@ -563,8 +760,16 @@ def _build_match_context(
         "h2h_summary": h2h_summary or {"ratio": h2h_ratio},
         "h2h_matches": [
             {
-                "home_goals": row.get("goals", {}).get("home", 0) if isinstance(row.get("goals"), dict) else 0,
-                "away_goals": row.get("goals", {}).get("away", 0) if isinstance(row.get("goals"), dict) else 0,
+                "home_goals": (
+                    int(row.get("home_goals", 0) or 0)
+                    if row.get("home_goals") is not None
+                    else int(row.get("goals", {}).get("home", 0) or 0)
+                ),
+                "away_goals": (
+                    int(row.get("away_goals", 0) or 0)
+                    if row.get("away_goals") is not None
+                    else int(row.get("goals", {}).get("away", 0) or 0)
+                ),
                 "is_cup": bool(row.get("is_cup", False)),
             }
             for row in h2h_rows
@@ -682,9 +887,16 @@ async def _run_match_analysis(
 
     api_match_id = int(match_row.get("api_match_id", 0) or 0)
     sofascore_match_id = int(match_row.get("sofascore_id", 0) or 0)
-    injuries = []
+    home_team_id = str(match_row["home_team_id"])
+    away_team_id = str(match_row["away_team_id"])
+    injuries: List[Dict[str, Any]] = []
+    injuries_by_side: Dict[str, List[Dict[str, Any]]] = {"home": [], "away": []}
     h2h_rows: List[Dict[str, Any]] = []
     h2h_summary: Optional[Dict[str, Any]] = None
+    h2h_matches: List[Dict[str, Any]] = []
+    home_recent_form: List[Dict[str, Any]] = []
+    away_recent_form: List[Dict[str, Any]] = []
+    sofascore_mapping: Optional[Dict[str, int]] = None
     if api_match_id > 0:
         await api_football.get_odds(api_match_id)
         await api_football.get_predictions(api_match_id)
@@ -697,16 +909,111 @@ async def _run_match_analysis(
             h2h_summary = {"ratio": _h2h_points_ratio(h2h_rows, home_api_id)}
 
     if sofascore_match_id > 0:
-        sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
-        if isinstance(sofa_h2h, dict) and sofa_h2h.get("ratio") is not None:
-            h2h_summary = sofa_h2h
+        sofascore_mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
+        if not isinstance(sofascore_mapping, dict):
+            sofascore_mapping = {"event_id": sofascore_match_id}
     else:
         mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
         sofascore_match_id = int(mapping.get("event_id", 0) or 0) if isinstance(mapping, dict) else 0
-        if sofascore_match_id > 0:
-            sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
-            if isinstance(sofa_h2h, dict) and sofa_h2h.get("ratio") is not None:
+        sofascore_mapping = mapping if isinstance(mapping, dict) else None
+
+    home_sofascore_id = int((sofascore_mapping or {}).get("home_sofascore_id", 0) or 0)
+    away_sofascore_id = int((sofascore_mapping or {}).get("away_sofascore_id", 0) or 0)
+    if sofascore_match_id > 0:
+        sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
+        if isinstance(sofa_h2h, dict):
+            if sofa_h2h.get("ratio") is not None:
                 h2h_summary = sofa_h2h
+            if isinstance(sofa_h2h.get("matches"), list):
+                h2h_matches = sofa_h2h.get("matches") or []
+        sofa_injuries = await sofascore.get_match_injuries(sofascore_match_id)
+        if isinstance(sofa_injuries, dict):
+            injuries_by_side = {
+                "home": sofa_injuries.get("home", []) or [],
+                "away": sofa_injuries.get("away", []) or [],
+            }
+
+    if home_sofascore_id > 0:
+        home_recent_form = await sofascore.get_team_recent_matches(home_sofascore_id, limit=6)
+    if away_sofascore_id > 0:
+        away_recent_form = await sofascore.get_team_recent_matches(away_sofascore_id, limit=6)
+
+    if home_sofascore_id > 0 and away_sofascore_id > 0:
+        pair_h2h = await sofascore.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=5)
+        if pair_h2h:
+            h2h_matches = pair_h2h
+            h2h_rows = [
+                {
+                    "match_date": row.get("match_date"),
+                    "home_goals": int(row.get("home_goals", 0) or 0),
+                    "away_goals": int(row.get("away_goals", 0) or 0),
+                    "league": row.get("league"),
+                    "sofascore_id": row.get("sofascore_id"),
+                    "is_cup": bool(row.get("is_cup", False)),
+                }
+                for row in pair_h2h
+                if isinstance(row, dict)
+            ]
+            if not isinstance(h2h_summary, dict):
+                home_wins = len([r for r in h2h_rows if int(r.get("home_goals", 0) or 0) > int(r.get("away_goals", 0) or 0)])
+                away_wins = len([r for r in h2h_rows if int(r.get("home_goals", 0) or 0) < int(r.get("away_goals", 0) or 0)])
+                draws = len([r for r in h2h_rows if int(r.get("home_goals", 0) or 0) == int(r.get("away_goals", 0) or 0)])
+                total = home_wins + away_wins + draws
+                h2h_summary = {
+                    "home_wins": home_wins,
+                    "away_wins": away_wins,
+                    "draws": draws,
+                    "ratio": round(home_wins / total, 4) if total > 0 else 0.5,
+                }
+
+    if not h2h_rows:
+        h2h_rows = _fetch_h2h_rows(client, home_team_id, away_team_id, limit=10)
+    if not h2h_matches and h2h_rows:
+        h2h_matches = [
+            {
+                "date": str(row.get("match_date") or "")[:10],
+                "match_date": row.get("match_date"),
+                "home_team": team_rows.get(home_team_id, {}).get("name", "Home"),
+                "away_team": team_rows.get(away_team_id, {}).get("name", "Away"),
+                "home_goals": int(row.get("home_goals", 0) or 0),
+                "away_goals": int(row.get("away_goals", 0) or 0),
+                "league": row.get("league"),
+                "sofascore_id": row.get("sofascore_id"),
+                "is_cup": bool(row.get("is_cup", False)),
+                "teams": {
+                    "home": {"name": team_rows.get(home_team_id, {}).get("name", "Home")},
+                    "away": {"name": team_rows.get(away_team_id, {}).get("name", "Away")},
+                },
+                "goals": {
+                    "home": int(row.get("home_goals", 0) or 0),
+                    "away": int(row.get("away_goals", 0) or 0),
+                },
+            }
+            for row in h2h_rows[:5]
+        ]
+
+    if not injuries_by_side["home"] and not injuries_by_side["away"]:
+        injuries_by_side = _fetch_match_injuries(client, resolved_match_id, home_team_id, away_team_id)
+
+    if injuries_by_side["home"] or injuries_by_side["away"]:
+        injuries = _flatten_injuries(
+            injuries_by_side,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            home_team_name=str(team_rows.get(home_team_id, {}).get("name", "Ev Sahibi")),
+            away_team_name=str(team_rows.get(away_team_id, {}).get("name", "Deplasman")),
+        )
+
+    should_backfill_team_stats = (
+        not home_stats
+        or not away_stats
+        or (_avg_stat(home_stats, "xg_for", limit=10) <= 0 and _avg_stat(away_stats, "xg_for", limit=10) <= 0)
+    )
+    if should_backfill_team_stats and home_sofascore_id > 0 and away_sofascore_id > 0:
+        await sofascore.populate_team_stats_for_match(resolved_match_id)
+        team_stats = _fetch_team_stats(client, [str(match_row["home_team_id"]), str(match_row["away_team_id"])])
+        home_stats = [row for row in team_stats if row.get("team_id") == match_row["home_team_id"]]
+        away_stats = [row for row in team_stats if row.get("team_id") == match_row["away_team_id"]]
 
     for team_id in [str(match_row["home_team_id"]), str(match_row["away_team_id"])]:
         row = team_rows.get(team_id, {})
@@ -752,6 +1059,29 @@ async def _run_match_analysis(
         weather_payload,
         pi_rating_delta,
     )
+    if home_recent_form:
+        context["form_points_last6"] = round(_form_score_from_results([str(item.get("result") or "D") for item in home_recent_form]) * 18.0, 3)
+    if away_recent_form:
+        away_points = _form_score_from_results([str(item.get("result") or "D") for item in away_recent_form]) * 18.0
+        home_points = float(context.get("form_points_last6", 9.0) or 9.0)
+        context["standing_pressure"] = max(0.0, min(1.0, 0.5 + ((home_points - away_points) / 36.0)))
+    if injuries_by_side["home"] or injuries_by_side["away"]:
+        context["missing_players"] = float(len(injuries_by_side["home"]) + len(injuries_by_side["away"]))
+        context["key_absences"] = float(
+            len(
+                [
+                    item
+                    for side in ["home", "away"]
+                    for item in (injuries_by_side.get(side, []) or [])
+                    if str(item.get("status", "")).lower() in {"injured", "suspended", "doubtful"}
+                ]
+            )
+        )
+    if isinstance(h2h_summary, dict) and h2h_summary.get("ratio") is not None:
+        context["h2h_ratio"] = float(h2h_summary.get("ratio", 0.5) or 0.5)
+        context["h2h_points_ratio"] = float(h2h_summary.get("ratio", 0.5) or 0.5)
+    if h2h_rows:
+        context["h2h_matches"] = h2h_rows
     analysis = analyze_match(context, confidence_threshold=confidence_threshold)
 
     probabilities = _build_market_probabilities(analysis["confidence_score"], context)
@@ -793,22 +1123,53 @@ async def _run_match_analysis(
                 "country": away_team.get("country"),
             },
         }
+        home_form_payload = _build_form_payload(recent_matches=home_recent_form, fallback_stats=home_stats)
+        away_form_payload = _build_form_payload(recent_matches=away_recent_form, fallback_stats=away_stats)
+        home_attack_xg = _avg_stat(home_stats, "xg_for", limit=10)
+        home_defense_xg = _avg_stat(home_stats, "xg_against", limit=10)
+        away_attack_xg = _avg_stat(away_stats, "xg_for", limit=10)
+        away_defense_xg = _avg_stat(away_stats, "xg_against", limit=10)
+        h2h_summary_payload = h2h_summary or {"ratio": context.get("h2h_ratio", 0.5)}
+        if isinstance(h2h_summary_payload, dict):
+            if "home_win_rate" not in h2h_summary_payload:
+                h2h_summary_payload["home_win_rate"] = float(h2h_summary_payload.get("ratio", 0.5) or 0.5)
+        h2h_response_matches = h2h_matches[:5] if h2h_matches else []
         payload["form"] = {
-            "home": _team_form_sequence(home_stats, limit=6),
-            "away": _team_form_sequence(away_stats, limit=6),
+            "home": {
+                "last6": home_form_payload["last6"],
+                "score": home_form_payload["score"],
+                "matches": home_form_payload["matches"],
+            },
+            "away": {
+                "last6": away_form_payload["last6"],
+                "score": away_form_payload["score"],
+                "matches": away_form_payload["matches"],
+            },
         }
-        payload["injuries"] = injuries
+        payload["form_legacy"] = {
+            "home": home_form_payload["legacy"],
+            "away": away_form_payload["legacy"],
+        }
+        payload["injuries"] = injuries_by_side
+        payload["injuries_flat"] = injuries
         payload["h2h"] = {
-            "summary": h2h_summary or {"ratio": context.get("h2h_ratio", 0.5)},
-            "last5": (h2h_rows or [])[:5],
+            "summary": h2h_summary_payload,
+            "matches": h2h_response_matches,
+            "last5": h2h_response_matches,
         }
         payload["xg"] = {
-            "home": round(sum(float(row.get("xg_for", 0) or 0) for row in home_stats[:10]) / max(1, len(home_stats[:10])), 3)
-            if home_stats
-            else 0.0,
-            "away": round(sum(float(row.get("xg_for", 0) or 0) for row in away_stats[:10]) / max(1, len(away_stats[:10])), 3)
-            if away_stats
-            else 0.0,
+            "home": {
+                "attack_xg": home_attack_xg,
+                "defense_xg": home_defense_xg,
+            },
+            "away": {
+                "attack_xg": away_attack_xg,
+                "defense_xg": away_defense_xg,
+            },
+            "legacy": {
+                "home": home_attack_xg,
+                "away": away_attack_xg,
+            },
         }
         payload["context"] = context
         payload["market_odds"] = odd_map
@@ -1274,11 +1635,13 @@ async def trigger_fetch_today() -> Dict[str, Any]:
 async def trigger_update_stats() -> Dict[str, Any]:
     weekly = await scheduler.update_weekly_team_stats()
     daily_stats = await scheduler.populate_today_team_stats_history()
+    injuries_h2h = await scheduler.refresh_today_injuries_and_h2h()
     pi_refresh = await scheduler.refresh_pi_ratings()
     return {
         "status": "ok",
         "weekly": weekly,
         "daily_team_stats": daily_stats,
+        "injuries_h2h": injuries_h2h,
         "pi_rating": {
             "processed_matches": pi_refresh.get("processed_matches", 0),
             "updated_teams": pi_refresh.get("updated_teams", 0),

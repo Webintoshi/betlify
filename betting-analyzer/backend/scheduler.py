@@ -303,6 +303,72 @@ class BettingScheduler:
         logger.info("Gunluk history team_stats gorevi tamamlandi. match=%s teams=%s", processed, updated_teams)
         return {"processed_matches": processed, "updated_teams": updated_teams}
 
+    async def refresh_today_injuries_and_h2h(self) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0}
+
+        today = datetime.now(self.timezone).date().isoformat()
+        tomorrow = (datetime.now(self.timezone).date() + timedelta(days=1)).isoformat()
+        has_match_sofascore = self.sofascore._has_column("matches", "sofascore_id")
+        select_columns = "id,match_date,status"
+        if has_match_sofascore:
+            select_columns += ",sofascore_id"
+        try:
+            result = (
+                self.supabase.table("matches")
+                .select(select_columns)
+                .gte("match_date", f"{today}T00:00:00")
+                .lte("match_date", f"{tomorrow}T23:59:59")
+                .in_("status", ["scheduled", "live", "finished"])
+                .order("match_date")
+                .execute()
+            )
+            matches = result.data or []
+        except Exception:
+            logger.exception("refresh_today_injuries_and_h2h: match query failed.")
+            return {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0}
+
+        processed = 0
+        injury_rows = 0
+        h2h_rows = 0
+        for row in matches:
+            match_id = str(row.get("id") or "")
+            if not match_id:
+                continue
+            event_id = _safe_int(row.get("sofascore_id")) if has_match_sofascore else 0
+            if event_id <= 0:
+                mapping = await self.sofascore._resolve_sofascore_team_ids_for_match(match_id)
+                event_id = _safe_int(mapping.get("event_id")) if isinstance(mapping, dict) else 0
+            if event_id <= 0:
+                continue
+
+            try:
+                injuries = await self.sofascore.get_match_injuries(event_id)
+                if isinstance(injuries, dict):
+                    home_count = len(injuries.get("home", []) or [])
+                    away_count = len(injuries.get("away", []) or [])
+                    injury_rows += home_count + away_count
+            except Exception:
+                logger.exception("refresh_today_injuries_and_h2h: injuries failed. event_id=%s", event_id)
+
+            try:
+                h2h = await self.sofascore.get_h2h(event_id)
+                if isinstance(h2h, dict) and isinstance(h2h.get("matches"), list):
+                    h2h_rows += len(h2h.get("matches") or [])
+            except Exception:
+                logger.exception("refresh_today_injuries_and_h2h: h2h failed. event_id=%s", event_id)
+
+            processed += 1
+            await asyncio.sleep(0.5)
+
+        logger.info(
+            "Sofascore injuries+h2h gorevi tamamlandi. processed=%s injury_rows=%s h2h_rows=%s",
+            processed,
+            injury_rows,
+            h2h_rows,
+        )
+        return {"processed_matches": processed, "injury_rows": injury_rows, "h2h_rows": h2h_rows}
+
     async def refresh_team_market_values(self) -> Dict[str, Any]:
         if self.supabase is None:
             return {"updated_teams": 0}
@@ -422,6 +488,8 @@ class BettingScheduler:
             return {"processed_matches": 0}
 
         processed = 0
+        injury_rows = 0
+        h2h_rows = 0
         for row in candidates:
             match_id = str(row.get("id"))
             sofascore_id = _safe_int(row.get("sofascore_id")) if has_match_sofascore else 0
@@ -434,10 +502,16 @@ class BettingScheduler:
             lineups = await self.sofascore.get_event_lineups(sofascore_id)
             pregame = await self.sofascore.get_event_pregame_form(sofascore_id)
             odds = await self.sofascore.get_event_odds(sofascore_id)
+            injuries = await self.sofascore.get_match_injuries(sofascore_id)
+            h2h = await self.sofascore.get_h2h(sofascore_id)
 
             missing_players = self._extract_missing_players(lineups)
             form_gap = self._extract_form_points(pregame)
             odds_signal = self._extract_odds_signal(odds)
+            if isinstance(injuries, dict):
+                injury_rows += len(injuries.get("home", []) or []) + len(injuries.get("away", []) or [])
+            if isinstance(h2h, dict) and isinstance(h2h.get("matches"), list):
+                h2h_rows += len(h2h.get("matches") or [])
 
             confidence = 50.0
             confidence += max(-10.0, min(10.0, form_gap * 2.0))
@@ -455,8 +529,13 @@ class BettingScheduler:
 
             processed += 1
 
-        logger.info("Sofascore pre-match gorevi tamamlandi. processed=%s", processed)
-        return {"processed_matches": processed}
+        logger.info(
+            "Sofascore pre-match gorevi tamamlandi. processed=%s injury_rows=%s h2h_rows=%s",
+            processed,
+            injury_rows,
+            h2h_rows,
+        )
+        return {"processed_matches": processed, "injury_rows": injury_rows, "h2h_rows": h2h_rows}
 
     async def refresh_sofascore_odds(self) -> Dict[str, Any]:
         result = await self.odds_scraper.refresh_todays_matches(timezone_name="Europe/Istanbul")
@@ -525,6 +604,13 @@ class BettingScheduler:
             hour=8,
             minute=0,
             id="sofascore-daily-events",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.refresh_today_injuries_and_h2h,
+            "interval",
+            hours=3,
+            id="sofascore-injuries-h2h-3h",
             replace_existing=True,
         )
         self.scheduler.add_job(

@@ -120,15 +120,75 @@ export type MatchAnalysisResponse = {
     };
   };
   form?: {
+    home:
+      | Array<{ result: "W" | "D" | "L"; goals_scored: number; goals_conceded: number; updated_at: string }>
+      | {
+          last6: Array<"W" | "D" | "L" | string>;
+          score: number;
+          matches: Array<{
+            date: string;
+            home_team_name: string;
+            away_team_name: string;
+            home_goals: number;
+            away_goals: number;
+            result: "W" | "D" | "L" | string;
+            is_home: boolean;
+          }>;
+        };
+    away:
+      | Array<{ result: "W" | "D" | "L"; goals_scored: number; goals_conceded: number; updated_at: string }>
+      | {
+          last6: Array<"W" | "D" | "L" | string>;
+          score: number;
+          matches: Array<{
+            date: string;
+            home_team_name: string;
+            away_team_name: string;
+            home_goals: number;
+            away_goals: number;
+            result: "W" | "D" | "L" | string;
+            is_home: boolean;
+          }>;
+        };
+  };
+  form_legacy?: {
     home: Array<{ result: "W" | "D" | "L"; goals_scored: number; goals_conceded: number; updated_at: string }>;
     away: Array<{ result: "W" | "D" | "L"; goals_scored: number; goals_conceded: number; updated_at: string }>;
   };
-  injuries?: Array<{
-    team_id: number;
+  injuries?:
+    | Array<{
+        team_id: string | number;
+        team_name: string;
+        player: string;
+        reason: string;
+        type: string;
+      }>
+    | {
+        home: Array<{
+          player_name: string;
+          position?: string;
+          status: string;
+          reason?: string;
+          expected_return?: string;
+        }>;
+        away: Array<{
+          player_name: string;
+          position?: string;
+          status: string;
+          reason?: string;
+          expected_return?: string;
+        }>;
+      };
+  injuries_flat?: Array<{
+    team_id: string | number;
     team_name: string;
     player: string;
-    reason: string;
-    type: string;
+    player_name?: string;
+    position?: string;
+    reason?: string;
+    type?: string;
+    status?: string;
+    expected_return?: string;
   }>;
   h2h?: {
     summary: {
@@ -136,12 +196,28 @@ export type MatchAnalysisResponse = {
       away_wins?: number;
       draws?: number;
       ratio: number;
+      home_win_rate?: number;
     };
-    last5: Array<Record<string, unknown>>;
+    matches?: Array<Record<string, unknown>>;
+    last5?: Array<Record<string, unknown>>;
   };
   xg?: {
-    home: number;
-    away: number;
+    home:
+      | number
+      | {
+          attack_xg: number;
+          defense_xg: number;
+        };
+    away:
+      | number
+      | {
+          attack_xg: number;
+          defense_xg: number;
+        };
+    legacy?: {
+      home: number;
+      away: number;
+    };
   };
 };
 

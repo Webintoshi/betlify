@@ -374,6 +374,132 @@ class SofaScoreService:
             return 0.5
         return 0.0
 
+    @staticmethod
+    def _result_code(team_goals: int, opp_goals: int) -> str:
+        if team_goals > opp_goals:
+            return "W"
+        if team_goals == opp_goals:
+            return "D"
+        return "L"
+
+    @staticmethod
+    def _estimate_xg(shots: float, shots_on_target: float, big_chances: float) -> float:
+        # Fallback xG approximation when Sofascore does not expose explicit expected-goals.
+        estimated = (shots * 0.08) + (shots_on_target * 0.22) + (big_chances * 0.35)
+        return round(max(0.0, min(5.0, estimated)), 3)
+
+    @staticmethod
+    def _normalize_missing_status(*, status_raw: str, reason_raw: str) -> str:
+        token = f"{status_raw} {reason_raw}".lower()
+        if any(flag in token for flag in ["suspend", "ceza", "ban", "red", "kirmizi", "yellow"]):
+            return "suspended"
+        if any(flag in token for flag in ["doubt", "question", "uncertain", "minor knock"]):
+            return "doubtful"
+        return "injured"
+
+    def _extract_missing_players(self, team_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        missing = team_payload.get("missingPlayers", []) if isinstance(team_payload.get("missingPlayers"), list) else []
+        rows: List[Dict[str, Any]] = []
+        for item in missing:
+            if not isinstance(item, dict):
+                continue
+            player_node = item.get("player", {}) if isinstance(item.get("player"), dict) else {}
+            player_name = str(player_node.get("name") or item.get("name") or item.get("playerName") or "").strip()
+            if not player_name:
+                continue
+            position = str(player_node.get("position") or player_node.get("shortName") or item.get("position") or "").strip()
+            reason = str(item.get("reason") or item.get("missingReason") or item.get("type") or "").strip()
+            status_raw = str(item.get("status") or item.get("type") or "").strip()
+            expected_return = str(
+                item.get("expectedReturn")
+                or item.get("expectedReturnDate")
+                or item.get("returnDate")
+                or ""
+            ).strip()
+            status = self._normalize_missing_status(status_raw=status_raw, reason_raw=reason)
+            rows.append(
+                {
+                    "player_name": player_name,
+                    "position": position,
+                    "status": status,
+                    "reason": reason,
+                    "expected_return": expected_return,
+                }
+            )
+        return rows
+
+    def _save_match_injuries(
+        self,
+        *,
+        match_id: str,
+        team_id: str,
+        entries: List[Dict[str, Any]],
+    ) -> int:
+        if self.supabase is None:
+            return 0
+        if not self._has_column("match_injuries", "match_id"):
+            return 0
+        saved = 0
+        for entry in entries:
+            player_name = str(entry.get("player_name") or "").strip()
+            if not player_name:
+                continue
+            payload = {
+                "match_id": match_id,
+                "team_id": team_id,
+                "player_name": player_name,
+                "position": entry.get("position") or None,
+                "status": entry.get("status") or "injured",
+                "reason": entry.get("reason") or None,
+                "expected_return": entry.get("expected_return") or None,
+            }
+            try:
+                self.supabase.table("match_injuries").upsert(
+                    payload,
+                    on_conflict="match_id,team_id,player_name",
+                ).execute()
+                saved += 1
+            except Exception:
+                logger.exception("match_injuries upsert failed. match_id=%s player=%s", match_id, player_name)
+        return saved
+
+    def _save_h2h_rows(
+        self,
+        *,
+        home_team_id: str,
+        away_team_id: str,
+        rows: List[Dict[str, Any]],
+    ) -> int:
+        if self.supabase is None:
+            return 0
+        if not self._has_column("h2h", "home_team_id"):
+            return 0
+        saved = 0
+        for row in rows:
+            sofascore_id = _safe_int(row.get("sofascore_id"))
+            match_date = str(row.get("match_date") or "")
+            if not match_date:
+                continue
+            payload = {
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "match_date": match_date,
+                "home_goals": _safe_int(row.get("home_goals")),
+                "away_goals": _safe_int(row.get("away_goals")),
+                "league": row.get("league") or None,
+                "sofascore_id": sofascore_id if sofascore_id > 0 else None,
+                "is_cup": bool(row.get("is_cup", False)),
+            }
+            try:
+                if sofascore_id > 0:
+                    self.supabase.table("h2h").upsert(payload, on_conflict="sofascore_id").execute()
+                else:
+                    self.supabase.table("h2h").insert(payload).execute()
+                saved += 1
+            except Exception:
+                logger.exception("h2h upsert failed. sofascore_id=%s", sofascore_id)
+        return saved
+
     def _ensure_match_from_event(self, event: Dict[str, Any]) -> Optional[str]:
         if self.supabase is None or not isinstance(event, dict):
             return None
@@ -569,8 +695,14 @@ class SofaScoreService:
         away_shots = stats.get("total shots", {}).get("away", 0.0)
         home_sot = stats.get("shots on target", {}).get("home", 0.0)
         away_sot = stats.get("shots on target", {}).get("away", 0.0)
+        home_big_chances = stats.get("big chances", {}).get("home", 0.0)
+        away_big_chances = stats.get("big chances", {}).get("away", 0.0)
         home_xg = stats.get("expected goals", {}).get("home", 0.0)
         away_xg = stats.get("expected goals", {}).get("away", 0.0)
+        if home_xg <= 0:
+            home_xg = self._estimate_xg(float(home_shots), float(home_sot), float(home_big_chances))
+        if away_xg <= 0:
+            away_xg = self._estimate_xg(float(away_shots), float(away_sot), float(away_big_chances))
 
         records = [
             {
@@ -858,7 +990,7 @@ class SofaScoreService:
             return {"team_id": team_id, "sofascore_team_id": sofascore_team_id, "updated_rows": 0}
 
         collected: List[Dict[str, Any]] = []
-        result_points: List[float] = []
+        form_points_last6: List[int] = []
         xg_values: List[float] = []
         has_xg_rolling_column = self._has_column("team_stats", "xg_rolling_10")
 
@@ -893,9 +1025,26 @@ class SofaScoreService:
             xg_against = stats_map.get("expected goals", {}).get(opp_key, 0.0)
             shots = stats_map.get("total shots", {}).get(side_key, 0.0)
             shots_on_target = stats_map.get("shots on target", {}).get(side_key, 0.0)
+            shots_against = stats_map.get("total shots", {}).get(opp_key, 0.0)
+            shots_on_target_against = stats_map.get("shots on target", {}).get(opp_key, 0.0)
+            big_chances_for = stats_map.get("big chances", {}).get(side_key, 0.0)
+            big_chances_against = stats_map.get("big chances", {}).get(opp_key, 0.0)
             possession = stats_map.get("ball possession", {}).get(side_key, 0.0)
+            if float(xg_for) <= 0:
+                xg_for = self._estimate_xg(float(shots), float(shots_on_target), float(big_chances_for))
+            if float(xg_against) <= 0:
+                xg_against = self._estimate_xg(
+                    float(shots_against),
+                    float(shots_on_target_against),
+                    float(big_chances_against),
+                )
 
-            result_points.append(self._result_points(goals_for, goals_against))
+            if goals_for > goals_against:
+                form_points_last6.append(3)
+            elif goals_for == goals_against:
+                form_points_last6.append(1)
+            else:
+                form_points_last6.append(0)
             xg_values.append(float(xg_for))
 
             row = {
@@ -914,8 +1063,8 @@ class SofaScoreService:
         if not collected:
             return {"team_id": team_id, "sofascore_team_id": sofascore_team_id, "updated_rows": 0}
 
-        last6 = result_points[:6]
-        form_last6 = round(sum(last6) / len(last6), 3) if last6 else 0.0
+        last6 = form_points_last6[:6]
+        form_last6 = round(sum(last6) / 18.0, 3) if last6 else 0.0
         xg_rolling_10 = round(sum(xg_values) / len(xg_values), 3) if xg_values else 0.0
 
         updated = 0
@@ -971,6 +1120,95 @@ class SofaScoreService:
             "away": away_stats,
         }
 
+    async def get_team_recent_matches(self, sofascore_team_id: int, limit: int = 6) -> List[Dict[str, Any]]:
+        if sofascore_team_id <= 0:
+            return []
+        payload = await self._request(f"/team/{sofascore_team_id}/events/last/0", ttl_seconds=1200)
+        if payload is None:
+            return []
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        if not isinstance(events, list):
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for event in events:
+            if len(rows) >= max(1, limit):
+                break
+            if not isinstance(event, dict):
+                continue
+            status_type = str(event.get("status", {}).get("type", "")).lower() if isinstance(event.get("status"), dict) else ""
+            if status_type not in {"finished", "ended"}:
+                continue
+            side = self._event_team_side(event, sofascore_team_id)
+            if side is None:
+                continue
+
+            home_goals, away_goals = self._event_goals(event)
+            is_home = side == "home"
+            goals_for = home_goals if is_home else away_goals
+            goals_against = away_goals if is_home else home_goals
+            result = self._result_code(goals_for, goals_against)
+
+            timestamp = _safe_int(event.get("startTimestamp"))
+            event_date = (
+                datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+                if timestamp > 0
+                else datetime.now(timezone.utc).isoformat()
+            )
+            home_team = event.get("homeTeam", {}) if isinstance(event.get("homeTeam"), dict) else {}
+            away_team = event.get("awayTeam", {}) if isinstance(event.get("awayTeam"), dict) else {}
+            tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
+            unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+            league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
+
+            rows.append(
+                {
+                    "date": event_date,
+                    "home_team_name": str(home_team.get("name") or "Home"),
+                    "away_team_name": str(away_team.get("name") or "Away"),
+                    "home_goals": home_goals,
+                    "away_goals": away_goals,
+                    "result": result,
+                    "is_home": is_home,
+                    "event_id": _safe_int(event.get("id")),
+                    "league": league_name,
+                }
+            )
+        return rows
+
+    async def get_match_injuries(self, sofascore_event_id: int) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+        payload = await self._request(f"/event/{sofascore_event_id}/lineups", ttl_seconds=300)
+        if payload is None:
+            return None
+        home_payload = payload.get("home", {}) if isinstance(payload.get("home"), dict) else {}
+        away_payload = payload.get("away", {}) if isinstance(payload.get("away"), dict) else {}
+        injuries = {
+            "home": self._extract_missing_players(home_payload),
+            "away": self._extract_missing_players(away_payload),
+        }
+        match = self._resolve_internal_match(sofascore_event_id)
+        if match and self.supabase is not None:
+            try:
+                home_saved = self._save_match_injuries(
+                    match_id=str(match["id"]),
+                    team_id=str(match["home_team_id"]),
+                    entries=injuries["home"],
+                )
+                away_saved = self._save_match_injuries(
+                    match_id=str(match["id"]),
+                    team_id=str(match["away_team_id"]),
+                    entries=injuries["away"],
+                )
+                logger.info(
+                    "match_injuries guncellendi. event_id=%s home=%s away=%s",
+                    sofascore_event_id,
+                    home_saved,
+                    away_saved,
+                )
+            except Exception:
+                logger.exception("match_injuries persist failed. event_id=%s", sofascore_event_id)
+        return injuries
+
     async def get_event_lineups(self, event_id: int) -> Optional[Dict[str, Any]]:
         payload = await self._request(f"/event/{event_id}/lineups", ttl_seconds=600)
         if payload is None:
@@ -1008,6 +1246,21 @@ class SofaScoreService:
                 self.supabase.table("predictions").insert(pred_payload).execute()
         except Exception:
             logger.exception("lineup prediction save failed. event_id=%s", event_id)
+        try:
+            home_injuries = self._extract_missing_players(home if isinstance(home, dict) else {})
+            away_injuries = self._extract_missing_players(away if isinstance(away, dict) else {})
+            self._save_match_injuries(
+                match_id=str(match["id"]),
+                team_id=str(match["home_team_id"]),
+                entries=home_injuries,
+            )
+            self._save_match_injuries(
+                match_id=str(match["id"]),
+                team_id=str(match["away_team_id"]),
+                entries=away_injuries,
+            )
+        except Exception:
+            logger.exception("lineup injuries save failed. event_id=%s", event_id)
         return payload
 
     async def get_event_pregame_form(self, event_id: int) -> Optional[Dict[str, Any]]:
@@ -1067,6 +1320,7 @@ class SofaScoreService:
         base_event_payload = await self._request(f"/event/{sofascore_event_id}", ttl_seconds=1800)
         base_event = base_event_payload.get("event", {}) if isinstance(base_event_payload, dict) else {}
         focus_home_team = _safe_int(base_event.get("homeTeam", {}).get("id") if isinstance(base_event.get("homeTeam"), dict) else 0)
+        match = self._resolve_internal_match(sofascore_event_id)
 
         payload = await self._request(f"/event/{sofascore_event_id}/h2h/events", ttl_seconds=1200)
         events = payload.get("events", []) if isinstance(payload, dict) else []
@@ -1076,46 +1330,107 @@ class SofaScoreService:
         draws = 0
         weighted_home = 0.0
         weighted_total = 0.0
+        response_matches: List[Dict[str, Any]] = []
+        db_rows: List[Dict[str, Any]] = []
 
         if isinstance(events, list) and events:
             for item in events[:10]:
                 if not isinstance(item, dict):
                     continue
-                if focus_home_team <= 0:
-                    continue
-                side = self._event_team_side(item, focus_home_team)
-                if side is None:
-                    continue
 
-                team_goals_home, team_goals_away = self._event_goals(item)
-                if side == "home":
-                    focus_goals = team_goals_home
-                    opp_goals = team_goals_away
-                else:
-                    focus_goals = team_goals_away
-                    opp_goals = team_goals_home
+                event_id = _safe_int(item.get("id"))
+                home_node = item.get("homeTeam", {}) if isinstance(item.get("homeTeam"), dict) else {}
+                away_node = item.get("awayTeam", {}) if isinstance(item.get("awayTeam"), dict) else {}
+                event_home_id = _safe_int(home_node.get("id"))
+                event_away_id = _safe_int(away_node.get("id"))
+                event_home_name = str(home_node.get("name") or "Home")
+                event_away_name = str(away_node.get("name") or "Away")
+                event_home_goals, event_away_goals = self._event_goals(item)
+                timestamp = _safe_int(item.get("startTimestamp"))
+                match_date = (
+                    datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+                    if timestamp > 0
+                    else datetime.now(timezone.utc).isoformat()
+                )
 
                 tournament = item.get("tournament", {}) if isinstance(item.get("tournament"), dict) else {}
                 unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
                 tournament_id = _safe_int(unique.get("id"))
-                is_tournament = bool(item.get("isTournament", False)) or (tournament_id > 0 and tournament_id not in SOFASCORE_TOURNAMENT_ID_SET)
-                weight = 0.3 if is_tournament else 0.7
-                weighted_total += weight
+                league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
+                is_cup = bool(item.get("isTournament", False)) or (
+                    tournament_id > 0 and tournament_id not in SOFASCORE_TOURNAMENT_ID_SET
+                )
+                weight = 0.3 if is_cup else 0.7
 
-                if focus_goals > opp_goals:
-                    home_wins += 1
-                    weighted_home += weight
-                elif focus_goals < opp_goals:
-                    away_wins += 1
+                side = self._event_team_side(item, focus_home_team) if focus_home_team > 0 else None
+                if side == "home":
+                    focus_goals = event_home_goals
+                    opp_goals = event_away_goals
+                elif side == "away":
+                    focus_goals = event_away_goals
+                    opp_goals = event_home_goals
                 else:
-                    draws += 1
+                    focus_goals = event_home_goals
+                    opp_goals = event_away_goals
 
+                if focus_home_team > 0:
+                    weighted_total += weight
+                    if focus_goals > opp_goals:
+                        home_wins += 1
+                        weighted_home += weight
+                    elif focus_goals < opp_goals:
+                        away_wins += 1
+                    else:
+                        draws += 1
+
+                response_matches.append(
+                    {
+                        "date": match_date[:10],
+                        "match_date": match_date,
+                        "home_team": event_home_name,
+                        "away_team": event_away_name,
+                        "home_goals": event_home_goals,
+                        "away_goals": event_away_goals,
+                        "league": league_name,
+                        "sofascore_id": event_id if event_id > 0 else None,
+                        "is_cup": is_cup,
+                        "teams": {
+                            "home": {"id": event_home_id, "name": event_home_name},
+                            "away": {"id": event_away_id, "name": event_away_name},
+                        },
+                        "goals": {"home": event_home_goals, "away": event_away_goals},
+                    }
+                )
+
+                if match:
+                    db_rows.append(
+                        {
+                            "match_date": match_date,
+                            "home_goals": focus_goals,
+                            "away_goals": opp_goals,
+                            "league": league_name,
+                            "sofascore_id": event_id if event_id > 0 else None,
+                            "is_cup": is_cup,
+                        }
+                    )
+
+            if match and db_rows:
+                self._save_h2h_rows(
+                    home_team_id=str(match["home_team_id"]),
+                    away_team_id=str(match["away_team_id"]),
+                    rows=db_rows,
+                )
+
+            total = home_wins + away_wins + draws
             ratio = round(weighted_home / weighted_total, 4) if weighted_total > 0 else 0.5
             return {
                 "home_wins": home_wins,
                 "away_wins": away_wins,
                 "draws": draws,
                 "ratio": ratio,
+                "home_win_rate": round(home_wins / total, 4) if total > 0 else ratio,
+                "matches": response_matches[:5],
+                "last5": response_matches[:5],
             }
 
         summary_payload = await self._request(f"/event/{sofascore_event_id}/h2h", ttl_seconds=1200)
@@ -1130,7 +1445,121 @@ class SofaScoreService:
             "away_wins": away_wins,
             "draws": draws,
             "ratio": ratio,
+            "home_win_rate": ratio,
+            "matches": [],
+            "last5": [],
         }
+
+    async def get_h2h_matches(self, home_sofascore_id: int, away_sofascore_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        if home_sofascore_id <= 0 or away_sofascore_id <= 0:
+            return []
+        max_rows = max(1, limit)
+        events: List[Dict[str, Any]] = []
+        endpoints = [
+            f"/team/{home_sofascore_id}/h2h/{away_sofascore_id}",
+            f"/team/{away_sofascore_id}/h2h/{home_sofascore_id}",
+            f"/team/{home_sofascore_id}/h2h/events/{away_sofascore_id}",
+            f"/team/{away_sofascore_id}/h2h/events/{home_sofascore_id}",
+        ]
+        for endpoint in endpoints:
+            payload = await self._request(endpoint, ttl_seconds=1200)
+            candidate = payload.get("events", []) if isinstance(payload, dict) else []
+            if isinstance(candidate, list) and candidate:
+                events = candidate
+                break
+
+        normalized: List[Dict[str, Any]] = []
+        for item in events[:max_rows]:
+            if not isinstance(item, dict):
+                continue
+            home_node = item.get("homeTeam", {}) if isinstance(item.get("homeTeam"), dict) else {}
+            away_node = item.get("awayTeam", {}) if isinstance(item.get("awayTeam"), dict) else {}
+            event_home_goals, event_away_goals = self._event_goals(item)
+            timestamp = _safe_int(item.get("startTimestamp"))
+            match_date = (
+                datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+                if timestamp > 0
+                else datetime.now(timezone.utc).isoformat()
+            )
+            tournament = item.get("tournament", {}) if isinstance(item.get("tournament"), dict) else {}
+            unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+            league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
+            normalized.append(
+                {
+                    "date": match_date[:10],
+                    "match_date": match_date,
+                    "home_team": str(home_node.get("name") or "Home"),
+                    "away_team": str(away_node.get("name") or "Away"),
+                    "home_goals": event_home_goals,
+                    "away_goals": event_away_goals,
+                    "league": league_name,
+                    "sofascore_id": _safe_int(item.get("id")) or None,
+                }
+            )
+        if normalized:
+            return normalized[:max_rows]
+
+        if self.supabase is None or not self._has_column("teams", "sofascore_id"):
+            return []
+        try:
+            team_rows = (
+                self.supabase.table("teams")
+                .select("id,sofascore_id")
+                .in_("sofascore_id", [home_sofascore_id, away_sofascore_id])
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+        by_sofascore = {_safe_int(row.get("sofascore_id")): row for row in team_rows}
+        home_team_row = by_sofascore.get(home_sofascore_id)
+        away_team_row = by_sofascore.get(away_sofascore_id)
+        if not home_team_row or not away_team_row:
+            return []
+
+        home_uuid = str(home_team_row.get("id") or "")
+        away_uuid = str(away_team_row.get("id") or "")
+        if not home_uuid or not away_uuid:
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        try:
+            direct = (
+                self.supabase.table("matches")
+                .select("sofascore_id,match_date")
+                .eq("home_team_id", home_uuid)
+                .eq("away_team_id", away_uuid)
+                .not_.is_("sofascore_id", "null")
+                .order("match_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            reverse = (
+                self.supabase.table("matches")
+                .select("sofascore_id,match_date")
+                .eq("home_team_id", away_uuid)
+                .eq("away_team_id", home_uuid)
+                .not_.is_("sofascore_id", "null")
+                .order("match_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            candidates.extend(direct.data or [])
+            candidates.extend(reverse.data or [])
+        except Exception:
+            return []
+        if not candidates:
+            return []
+        candidates.sort(key=lambda row: str(row.get("match_date") or ""), reverse=True)
+        reference_event_id = _safe_int(candidates[0].get("sofascore_id"))
+        if reference_event_id <= 0:
+            return []
+        summary = await self.get_h2h(reference_event_id)
+        if not isinstance(summary, dict):
+            return []
+        matches = summary.get("matches", [])
+        return matches[:max_rows] if isinstance(matches, list) else []
 
     async def close(self) -> None:
         return
@@ -1167,6 +1596,14 @@ async def populate_team_stats_for_match(match_id: str) -> Optional[Dict[str, Any
     return await _default_service.populate_team_stats_for_match(match_id)
 
 
+async def get_team_recent_matches(sofascore_team_id: int, limit: int = 6) -> List[Dict[str, Any]]:
+    return await _default_service.get_team_recent_matches(sofascore_team_id, limit=limit)
+
+
+async def get_match_injuries(sofascore_event_id: int) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    return await _default_service.get_match_injuries(sofascore_event_id)
+
+
 async def get_event_lineups(event_id: int) -> Optional[Dict[str, Any]]:
     return await _default_service.get_event_lineups(event_id)
 
@@ -1177,3 +1614,7 @@ async def get_event_pregame_form(event_id: int) -> Optional[Dict[str, Any]]:
 
 async def get_h2h(event_id: int) -> Optional[Dict[str, Any]]:
     return await _default_service.get_h2h(event_id)
+
+
+async def get_h2h_matches(home_sofascore_id: int, away_sofascore_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    return await _default_service.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=limit)
