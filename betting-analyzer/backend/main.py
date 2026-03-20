@@ -977,6 +977,7 @@ async def _run_match_analysis(
     confidence_threshold: float,
     *,
     include_details: bool = False,
+    refresh_live: bool = False,
 ) -> Dict[str, Any]:
     try:
         client = get_supabase_client()
@@ -1005,7 +1006,7 @@ async def _run_match_analysis(
     home_recent_form: List[Dict[str, Any]] = []
     away_recent_form: List[Dict[str, Any]] = []
     sofascore_mapping: Optional[Dict[str, int]] = None
-    if api_match_id > 0:
+    if api_match_id > 0 and refresh_live:
         await api_football.get_odds(api_match_id)
         await api_football.get_predictions(api_match_id)
         injuries = await api_football.get_injuries(api_match_id) or []
@@ -1016,18 +1017,25 @@ async def _run_match_analysis(
             h2h_rows = await api_football.get_head_to_head(home_api_id, away_api_id) or []
             h2h_summary = {"ratio": _h2h_points_ratio(h2h_rows, home_api_id)}
 
-    if sofascore_match_id > 0:
-        sofascore_mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
-        if not isinstance(sofascore_mapping, dict):
-            sofascore_mapping = {"event_id": sofascore_match_id}
+    if refresh_live:
+        if sofascore_match_id > 0:
+            sofascore_mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
+            if not isinstance(sofascore_mapping, dict):
+                sofascore_mapping = {"event_id": sofascore_match_id}
+        else:
+            mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
+            sofascore_match_id = int(mapping.get("event_id", 0) or 0) if isinstance(mapping, dict) else 0
+            sofascore_mapping = mapping if isinstance(mapping, dict) else None
     else:
-        mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
-        sofascore_match_id = int(mapping.get("event_id", 0) or 0) if isinstance(mapping, dict) else 0
-        sofascore_mapping = mapping if isinstance(mapping, dict) else None
+        sofascore_mapping = {
+            "event_id": sofascore_match_id,
+            "home_sofascore_id": int(team_rows.get(home_team_id, {}).get("sofascore_id", 0) or 0),
+            "away_sofascore_id": int(team_rows.get(away_team_id, {}).get("sofascore_id", 0) or 0),
+        }
 
     home_sofascore_id = int((sofascore_mapping or {}).get("home_sofascore_id", 0) or 0)
     away_sofascore_id = int((sofascore_mapping or {}).get("away_sofascore_id", 0) or 0)
-    if sofascore_match_id > 0:
+    if sofascore_match_id > 0 and refresh_live:
         sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
         if isinstance(sofa_h2h, dict):
             if sofa_h2h.get("ratio") is not None:
@@ -1042,14 +1050,14 @@ async def _run_match_analysis(
             }
         await sofascore.get_event_odds_history(sofascore_match_id)
 
-    if home_sofascore_id > 0:
+    if home_sofascore_id > 0 and refresh_live:
         home_recent_form = await sofascore.get_team_recent_matches(home_sofascore_id, limit=6)
         await sofascore.get_team_halftime_statistics(
             team_id=home_team_id,
             sofascore_team_id=home_sofascore_id,
             season=str(match_row.get("season") or ""),
         )
-    if away_sofascore_id > 0:
+    if away_sofascore_id > 0 and refresh_live:
         away_recent_form = await sofascore.get_team_recent_matches(away_sofascore_id, limit=6)
         await sofascore.get_team_halftime_statistics(
             team_id=away_team_id,
@@ -1057,7 +1065,7 @@ async def _run_match_analysis(
             season=str(match_row.get("season") or ""),
         )
 
-    if home_sofascore_id > 0 and away_sofascore_id > 0:
+    if home_sofascore_id > 0 and away_sofascore_id > 0 and refresh_live:
         pair_h2h = await sofascore.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=5)
         if pair_h2h:
             h2h_matches = pair_h2h
@@ -1128,26 +1136,27 @@ async def _run_match_analysis(
         or not away_stats
         or (_avg_stat(home_stats, "xg_for", limit=10) <= 0 and _avg_stat(away_stats, "xg_for", limit=10) <= 0)
     )
-    if should_backfill_team_stats and home_sofascore_id > 0 and away_sofascore_id > 0:
+    if refresh_live and should_backfill_team_stats and home_sofascore_id > 0 and away_sofascore_id > 0:
         await sofascore.populate_team_stats_for_match(resolved_match_id)
         team_stats = _fetch_team_stats(client, [str(match_row["home_team_id"]), str(match_row["away_team_id"])])
         home_stats = [row for row in team_stats if row.get("team_id") == match_row["home_team_id"]]
         away_stats = [row for row in team_stats if row.get("team_id") == match_row["away_team_id"]]
 
-    for team_id in [str(match_row["home_team_id"]), str(match_row["away_team_id"])]:
-        row = team_rows.get(team_id, {})
-        current_value = float(row.get("market_value", 0) or 0)
-        team_name = str(row.get("name", "")).strip()
-        if current_value > 0 or not team_name:
-            continue
-        fetched_value = await transfermarkt_service.get_team_market_value(team_name)
-        if fetched_value is not None and fetched_value > 0:
-            row["market_value"] = fetched_value
-            try:
-                if client:
-                    client.table("teams").update({"market_value": fetched_value}).eq("id", team_id).execute()
-            except Exception:
-                logger.warning("Market value runtime update failed. team_id=%s", team_id)
+    if refresh_live:
+        for team_id in [str(match_row["home_team_id"]), str(match_row["away_team_id"])]:
+            row = team_rows.get(team_id, {})
+            current_value = float(row.get("market_value", 0) or 0)
+            team_name = str(row.get("name", "")).strip()
+            if current_value > 0 or not team_name:
+                continue
+            fetched_value = await transfermarkt_service.get_team_market_value(team_name)
+            if fetched_value is not None and fetched_value > 0:
+                row["market_value"] = fetched_value
+                try:
+                    if client:
+                        client.table("teams").update({"market_value": fetched_value}).eq("id", team_id).execute()
+                except Exception:
+                    logger.warning("Market value runtime update failed. team_id=%s", team_id)
 
     home_team = team_rows.get(str(match_row["home_team_id"]), {})
     away_team = team_rows.get(str(match_row["away_team_id"]), {})
@@ -1171,7 +1180,7 @@ async def _run_match_analysis(
     match_row["ht_home_ratio"] = ht_ratios["home"]
     match_row["ht_away_ratio"] = ht_ratios["away"]
 
-    live_odds = await odds_scraper.get_odds_for_match(resolved_match_id)
+    live_odds = await odds_scraper.get_odds_for_match(resolved_match_id) if refresh_live else {}
     stored_odds = _fetch_odds(client, resolved_match_id)
     odds = {**stored_odds, **live_odds}
     weather_city = str(team_rows.get(match_row["home_team_id"], {}).get("country") or "").strip()
@@ -1381,8 +1390,9 @@ async def test_fetch_today() -> Dict[str, Any]:
 async def test_analyze(
     match_id: str,
     confidence_threshold: float = Query(default=60.0, ge=0.0, le=100.0),
+    refresh: bool = Query(default=False),
 ) -> Dict[str, Any]:
-    return await _run_match_analysis(match_id, confidence_threshold)
+    return await _run_match_analysis(match_id, confidence_threshold, refresh_live=refresh)
 
 
 @app.get("/test/populate-stats/{match_id}")
@@ -1525,16 +1535,26 @@ async def test_sofascore(date: str) -> Dict[str, Any]:
 
 
 @app.post("/analyze/{match_id}")
-async def analyze_match_endpoint(match_id: str, body: AnalyzeRequest) -> Dict[str, Any]:
-    return await _run_match_analysis(match_id, body.confidence_threshold)
+async def analyze_match_endpoint(
+    match_id: str,
+    body: AnalyzeRequest,
+    refresh: bool = Query(default=True),
+) -> Dict[str, Any]:
+    return await _run_match_analysis(match_id, body.confidence_threshold, refresh_live=refresh)
 
 
 @app.get("/matches/{match_id}/analysis")
 async def get_match_analysis(
     match_id: str,
     confidence_threshold: float = Query(default=60.0, ge=0.0, le=100.0),
+    refresh: bool = Query(default=False),
 ) -> Dict[str, Any]:
-    return await _run_match_analysis(match_id, confidence_threshold, include_details=True)
+    return await _run_match_analysis(
+        match_id,
+        confidence_threshold,
+        include_details=True,
+        refresh_live=refresh,
+    )
 
 
 @app.get("/matches/{match_id}/odds")
