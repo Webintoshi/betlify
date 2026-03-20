@@ -21,6 +21,7 @@ from api_football import get_service as get_api_service
 from config import TRACKED_LEAGUE_IDS
 from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
 from pi_rating import calculate_pi_ratings
+from proxy_pool import ProxyPool, mask_proxy
 from scheduler import BettingScheduler
 from services.odds_scraper import get_service as get_odds_scraper_service
 from sofascore import get_service as get_sofascore_service, stable_uuid
@@ -961,6 +962,8 @@ async def test_sofascore_odds(sofascore_event_id: int) -> Dict[str, Any]:
 @app.get("/test/sofascore-debug")
 async def test_sofascore_debug() -> Dict[str, Any]:
     cookie = os.getenv("SOFASCORE_COOKIE", "")
+    proxy_pool = ProxyPool.from_env()
+    proxy = proxy_pool.next()
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -973,7 +976,7 @@ async def test_sofascore_debug() -> Dict[str, Any]:
         headers["Cookie"] = cookie
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, proxy=proxy) as client:
             response = await client.get(
                 "https://www.sofascore.com/api/v1/event/13981717/odds/1/all",
                 headers=headers,
@@ -981,12 +984,21 @@ async def test_sofascore_debug() -> Dict[str, Any]:
             return {
                 "cookie_set": bool(cookie),
                 "cookie_length": len(cookie),
+                "proxy_enabled": proxy_pool.enabled,
+                "proxy_pool_size": proxy_pool.size,
+                "proxy_used": mask_proxy(proxy),
                 "http_status": response.status_code,
                 "response_size": len(response.text),
                 "response_preview": response.text[:300],
             }
     except Exception as exc:
-        return {"error": str(exc), "cookie_set": bool(cookie)}
+        return {
+            "error": str(exc),
+            "cookie_set": bool(cookie),
+            "proxy_enabled": proxy_pool.enabled,
+            "proxy_pool_size": proxy_pool.size,
+            "proxy_used": mask_proxy(proxy),
+        }
 
 
 @app.get("/test/sofascore/{date}")

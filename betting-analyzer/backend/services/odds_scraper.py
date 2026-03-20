@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
 from supabase import Client, create_client
+from proxy_pool import ProxyPool, mask_proxy
 
 logger = logging.getLogger("odds_scraper")
 
@@ -172,6 +173,7 @@ class OddsScraperService:
         self._last_request_ts = 0.0
         self._odds_table_available: Optional[bool] = None
         self._best_bet_column_available: Optional[bool] = None
+        self.proxy_pool = ProxyPool.from_env()
 
     @staticmethod
     def _build_supabase_client() -> Optional[Client]:
@@ -197,17 +199,30 @@ class OddsScraperService:
         url = f"{BASE_URL}{ODDS_ENDPOINT.format(event_id=event_id)}"
         for attempt in range(1, 4):
             await self._respect_rate_limit()
+            proxy = self.proxy_pool.next()
+            proxy_masked = mask_proxy(proxy)
             try:
                 async with AsyncSession(impersonate="chrome120") as session:
-                    response = await session.get(url, headers=HEADERS, timeout=20)
+                    response = await session.get(url, headers=HEADERS, timeout=20, proxy=proxy)
             except Exception as exc:
-                logger.warning("Sofascore odds request failed. event_id=%s attempt=%s err=%s", event_id, attempt, exc)
+                logger.warning(
+                    "Sofascore odds request failed. event_id=%s attempt=%s proxy=%s err=%s",
+                    event_id,
+                    attempt,
+                    proxy_masked,
+                    exc,
+                )
                 if attempt < 3:
                     await asyncio.sleep(0.8 * attempt)
                 continue
 
             if response.status_code == 429:
-                logger.warning("Sofascore odds 429. event_id=%s attempt=%s", event_id, attempt)
+                logger.warning(
+                    "Sofascore odds 429. event_id=%s attempt=%s proxy=%s",
+                    event_id,
+                    attempt,
+                    proxy_masked,
+                )
                 await asyncio.sleep(60)
                 continue
 
@@ -220,10 +235,11 @@ class OddsScraperService:
                     logger.warning("Sofascore odds JSON parse failed. event_id=%s attempt=%s", event_id, attempt)
             else:
                 logger.warning(
-                    "Sofascore odds HTTP %s event_id=%s attempt=%s",
+                    "Sofascore odds HTTP %s event_id=%s attempt=%s proxy=%s",
                     response.status_code,
                     event_id,
                     attempt,
+                    proxy_masked,
                 )
             if attempt < 3:
                 await asyncio.sleep(0.8 * attempt)

@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from supabase import Client, create_client
 
 from config import SOFASCORE_TOURNAMENT_ID_SET, SOFASCORE_TOURNAMENT_IDS
+from proxy_pool import ProxyPool, mask_proxy
 
 logger = logging.getLogger("sofascore")
 
@@ -107,6 +108,7 @@ class SofaScoreService:
         self._last_request_ts: Optional[float] = None
         self._endpoint_last_call_ts: Dict[str, float] = {}
         self._column_exists_cache: Dict[str, bool] = {}
+        self.proxy_pool = ProxyPool.from_env()
 
     @staticmethod
     def _build_supabase_client() -> Optional[Client]:
@@ -201,21 +203,11 @@ class SofaScoreService:
 
     async def _fetch(self, url: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
         await asyncio.sleep(2)
-        try:
-            async with AsyncSession(impersonate="chrome120") as session:
-                response = await session.get(
-                    url,
-                    params=params,
-                    headers=HEADERS,
-                    timeout=15,
-                )
-        except Exception as exc:
-            logger.error("Sofascore request failed: %s", exc)
-            return None
+        max_attempts = 1 if not self.proxy_pool.enabled else min(3, self.proxy_pool.size)
 
-        if response.status_code == 429:
-            logger.warning("Sofascore 429 - 60s bekleniyor")
-            await asyncio.sleep(60)
+        for attempt in range(1, max_attempts + 1):
+            proxy = self.proxy_pool.next()
+            proxy_masked = mask_proxy(proxy)
             try:
                 async with AsyncSession(impersonate="chrome120") as session:
                     response = await session.get(
@@ -223,24 +215,37 @@ class SofaScoreService:
                         params=params,
                         headers=HEADERS,
                         timeout=15,
+                        proxy=proxy,
                     )
             except Exception as exc:
-                logger.error("Sofascore retry failed: %s", exc)
+                logger.error(
+                    "Sofascore request failed (attempt=%s proxy=%s): %s",
+                    attempt,
+                    proxy_masked,
+                    exc,
+                )
+                continue
+
+            if response.status_code == 429:
+                logger.warning("Sofascore 429 - 60s bekleniyor (proxy=%s)", proxy_masked)
+                await asyncio.sleep(60)
+                continue
+
+            if response.status_code == 403:
+                logger.error("Sofascore 403: %s (proxy=%s)", url, proxy_masked)
+                continue
+
+            if response.status_code >= 400:
+                logger.error("HTTP %s: %s (proxy=%s)", response.status_code, url, proxy_masked)
+                continue
+
+            try:
+                return response.json()
+            except Exception:
+                logger.error("Sofascore JSON parse hatasi: %s (proxy=%s)", url, proxy_masked)
                 return None
 
-        if response.status_code == 403:
-            logger.error("Sofascore 403: %s", url)
-            return None
-
-        if response.status_code >= 400:
-            logger.error("HTTP %s: %s", response.status_code, url)
-            return None
-
-        try:
-            return response.json()
-        except Exception:
-            logger.error("Sofascore JSON parse hatasi: %s", url)
-            return None
+        return None
 
     async def _request(
         self,
