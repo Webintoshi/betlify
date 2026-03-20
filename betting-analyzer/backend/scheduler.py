@@ -12,6 +12,7 @@ from api_football import ApiFootballService, get_service as get_api_service
 from config import DEFAULT_SEASON, TRACKED_LEAGUE_IDS
 from odds_tracker import OddsTrackerService
 from pi_rating import update_team_pi_ratings
+from services.odds_scraper import OddsScraperService, get_service as get_odds_scraper_service
 from sofascore import SofaScoreService, get_service as get_sofascore_service
 from transfermarkt import TransfermarktService, get_service as get_transfermarkt_service
 
@@ -34,6 +35,7 @@ class BettingScheduler:
         self.api_service: ApiFootballService = get_api_service()
         self.supabase = self.api_service.supabase
         self.odds_tracker = OddsTrackerService(supabase_client=self.supabase)
+        self.odds_scraper: OddsScraperService = get_odds_scraper_service()
         self.sofascore: SofaScoreService = get_sofascore_service()
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
 
@@ -456,6 +458,15 @@ class BettingScheduler:
         logger.info("Sofascore pre-match gorevi tamamlandi. processed=%s", processed)
         return {"processed_matches": processed}
 
+    async def refresh_sofascore_odds(self) -> Dict[str, Any]:
+        result = await self.odds_scraper.refresh_todays_matches(timezone_name="Europe/Istanbul")
+        logger.info(
+            "Sofascore odds gorevi tamamlandi. processed_matches=%s updated_markets=%s",
+            result.get("processed_matches", 0),
+            result.get("updated_markets", 0),
+        )
+        return result
+
     def configure(self) -> None:
         if self.scheduler.get_job("daily-fixtures"):
             return
@@ -523,6 +534,13 @@ class BettingScheduler:
             id="sofascore-prematch-2h",
             replace_existing=True,
         )
+        self.scheduler.add_job(
+            self.refresh_sofascore_odds,
+            "interval",
+            minutes=30,
+            id="sofascore-odds-30m",
+            replace_existing=True,
+        )
 
     def start(self) -> None:
         if not self.scheduler.running:
@@ -535,5 +553,6 @@ class BettingScheduler:
             self.scheduler.shutdown(wait=False)
         await self.api_service.close()
         await self.odds_tracker.close()
+        await self.odds_scraper.close()
         await self.sofascore.close()
         await self.transfermarkt.close()

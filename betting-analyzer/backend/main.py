@@ -21,6 +21,7 @@ from config import TRACKED_LEAGUE_IDS
 from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
 from pi_rating import calculate_pi_ratings
 from scheduler import BettingScheduler
+from services.odds_scraper import get_service as get_odds_scraper_service
 from sofascore import get_service as get_sofascore_service, stable_uuid
 from transfermarkt import get_service as get_transfermarkt_service
 from weather import get_service as get_weather_service
@@ -38,6 +39,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 scheduler = BettingScheduler()
 api_football = get_api_service()
+odds_scraper = get_odds_scraper_service()
 sofascore = get_sofascore_service()
 transfermarkt_service = get_transfermarkt_service()
 weather_service = get_weather_service()
@@ -139,6 +141,7 @@ async def _run_full_backfill() -> None:
             sofascore_by_date[date_str] = count
 
         daily_stats_result = await scheduler.populate_today_team_stats_history()
+        odds_refresh_result = await scheduler.refresh_sofascore_odds()
         weekly_stats_result = await scheduler.update_weekly_team_stats()
         pi_rating_result = await scheduler.refresh_pi_ratings()
 
@@ -146,6 +149,7 @@ async def _run_full_backfill() -> None:
             "fixtures": fixtures_result,
             "sofascore": {"total_saved": sofascore_total, "by_date": sofascore_by_date},
             "daily_team_stats": daily_stats_result,
+            "odds_refresh": odds_refresh_result,
             "weekly_team_stats": weekly_stats_result,
             "pi_rating": pi_rating_result,
         }
@@ -385,6 +389,9 @@ def _count_odds_rows(client: Client, match_id: Optional[str]) -> int:
 
 
 def _normalize_market_key(market_type: str) -> Optional[str]:
+    direct = str(market_type or "").strip().upper()
+    if direct in SUPPORTED_MARKETS:
+        return direct
     normalized = market_type.lower()
     if "match winner:home" in normalized or "1x2:home" in normalized:
         return "MS1"
@@ -720,7 +727,9 @@ async def _run_match_analysis(
             str(match_row["away_team_id"]),
         )
 
-    odds = _fetch_odds(client, resolved_match_id)
+    live_odds = await odds_scraper.get_odds_for_match(resolved_match_id)
+    stored_odds = _fetch_odds(client, resolved_match_id)
+    odds = {**stored_odds, **live_odds}
     weather_city = str(team_rows.get(match_row["home_team_id"], {}).get("country") or "").strip()
     weather_payload = await weather_service.get_match_weather(weather_city, str(match_row.get("match_date", "")))
     context = _build_match_context(
@@ -737,7 +746,11 @@ async def _run_match_analysis(
     analysis = analyze_match(context, confidence_threshold=confidence_threshold)
 
     probabilities = _build_market_probabilities(analysis["confidence_score"], context)
-    odd_map = {market: odds.get(market, 1.75) for market in SUPPORTED_MARKETS}
+    odd_map = {
+        market: float(odd)
+        for market, odd in odds.items()
+        if market in SUPPORTED_MARKETS and float(odd) > 0
+    }
     ev_result = evaluate_markets(
         market_probabilities=probabilities,
         market_odds=odd_map,
@@ -745,6 +758,7 @@ async def _run_match_analysis(
         confidence_threshold=confidence_threshold,
     )
     _save_predictions(client, resolved_match_id, ev_result)
+    odds_scraper.save_ev_rows(match_id=resolved_match_id, ev_result=ev_result)
     payload: Dict[str, Any] = {
         "match_id": resolved_match_id,
         "analysis": analysis,
@@ -967,6 +981,37 @@ async def get_match_analysis(
     confidence_threshold: float = Query(default=60.0, ge=0.0, le=100.0),
 ) -> Dict[str, Any]:
     return await _run_match_analysis(match_id, confidence_threshold, include_details=True)
+
+
+@app.get("/matches/{match_id}/odds")
+async def get_match_odds(match_id: str, refresh: bool = Query(default=False)) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    resolved_match_id = _resolve_match_id(client, match_id)
+    if not resolved_match_id:
+        raise HTTPException(status_code=404, detail="Match not found.")
+
+    live_odds: Dict[str, float] = {}
+    if refresh:
+        live_odds = await odds_scraper.get_odds_for_match(resolved_match_id)
+
+    stored_odds = _fetch_odds(client, resolved_match_id)
+    merged_odds = {**stored_odds, **live_odds}
+    return {
+        "match_id": resolved_match_id,
+        "count": len(merged_odds),
+        "odds": dict(sorted(merged_odds.items(), key=lambda item: item[0])),
+        "refreshed": refresh,
+    }
+
+
+@app.post("/admin/refresh-odds")
+async def admin_refresh_odds() -> Dict[str, Any]:
+    result = await scheduler.refresh_sofascore_odds()
+    return {"status": "ok", **result}
 
 
 @app.post("/coupons")
@@ -1230,6 +1275,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
 
     items: List[Dict[str, Any]] = []
     for row in rows:
+        odds = _fetch_odds(client, str(row["id"]))
         context = {
             "form_points_last6": 9.0,
             "xg_diff_last6": 0.0,
@@ -1237,8 +1283,8 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
             "key_absences": 0.0,
             "xg_rolling_diff_10": 0.0,
             "market_value_delta_pct": 0.0,
-            "opening_odd": 1.9,
-            "closing_odd": 1.8,
+            "opening_odd": odds.get("MS1"),
+            "closing_odd": odds.get("MS1"),
             "h2h_points_ratio": 0.5,
             "h2h_matches": [],
             "standing_pressure": 0.5,
@@ -1250,10 +1296,14 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
         }
         analysis = analyze_match(context, confidence_threshold=min_confidence)
         probabilities = _build_market_probabilities(analysis["confidence_score"], context)
-        dummy_odds = {market: 1.8 for market in SUPPORTED_MARKETS}
+        market_odds = {
+            market: float(odd)
+            for market, odd in odds.items()
+            if market in SUPPORTED_MARKETS and float(odd) > 0
+        }
         ev = evaluate_markets(
             market_probabilities=probabilities,
-            market_odds=dummy_odds,
+            market_odds=market_odds,
             confidence_score=analysis["confidence_score"],
             confidence_threshold=min_confidence,
         )
