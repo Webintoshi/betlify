@@ -1,7 +1,7 @@
 import type { HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
-type BadgeVariant = "neutral" | "success" | "warning" | "error" | "accent" | "outline";
+type BadgeVariant = "neutral" | "success" | "warning" | "error" | "accent";
 type BadgeSize = "sm" | "md";
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
@@ -12,43 +12,33 @@ interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 
 const variantStyles: Record<BadgeVariant, string> = {
   neutral: [
-    "bg-sky-500/10",
-    "text-sky-300",
-    "border border-sky-500/20"
+    "bg-card-hover",
+    "text-foreground-tertiary",
+    "border border-card-border"
   ].join(" "),
   
   accent: [
     "bg-accent/20",
     "text-accent",
-    "border border-accent/40",
-    "shadow-[0_0_12px_rgba(14,165,233,0.2)]"
+    "border border-accent"
   ].join(" "),
   
   success: [
     "bg-success/20",
     "text-success-bright",
-    "border border-success/30",
-    "shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+    "border border-success"
   ].join(" "),
   
   warning: [
     "bg-warning/20",
     "text-warning-bright",
-    "border border-warning/30",
-    "shadow-[0_0_12px_rgba(245,158,11,0.2)]"
+    "border border-warning"
   ].join(" "),
   
   error: [
     "bg-error/20",
     "text-error-bright",
-    "border border-error/30",
-    "shadow-[0_0_12px_rgba(239,68,68,0.2)]"
-  ].join(" "),
-  
-  outline: [
-    "bg-transparent",
-    "text-foreground-tertiary",
-    "border border-sky-500/30"
+    "border border-error"
   ].join(" ")
 };
 
@@ -58,12 +48,11 @@ const sizeStyles: Record<BadgeSize, string> = {
 };
 
 const dotColors: Record<BadgeVariant, string> = {
-  neutral: "bg-sky-400",
+  neutral: "bg-foreground-muted",
   accent: "bg-accent",
   success: "bg-success-bright",
   warning: "bg-warning-bright",
-  error: "bg-error-bright",
-  outline: "bg-sky-400"
+  error: "bg-error-bright"
 };
 
 export function Badge({ 
@@ -78,9 +67,9 @@ export function Badge({
     <span
       className={cn(
         "inline-flex items-center gap-1.5",
-        "font-medium",
-        "rounded-full",
-        "transition-all duration-200",
+        "font-bold uppercase tracking-wider",
+        "rounded-md",
+        "transition-colors duration-150",
         sizeStyles[size],
         variantStyles[variant],
         className

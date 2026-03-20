@@ -2,7 +2,7 @@ import type { HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
 interface CardProps extends HTMLAttributes<HTMLDivElement> {
-  variant?: "default" | "glass" | "elevated" | "gradient";
+  variant?: "default" | "elevated" | "accent" | "outline";
   hover?: boolean;
 }
 
@@ -13,19 +13,19 @@ export function Card({
   ...props 
 }: CardProps) {
   const variantStyles = {
-    default: "bg-card/90 border border-white/[0.06] shadow-card backdrop-blur-xl",
-    glass: "bg-white/[0.03] border border-white/[0.08] shadow-lg backdrop-blur-2xl",
-    elevated: "bg-card border border-white/[0.06] shadow-xl backdrop-blur-xl",
-    gradient: "bg-gradient-to-br from-card to-card/50 border border-accent/20 shadow-glow-sm backdrop-blur-xl"
+    default: "bg-card border border-card-border shadow-card",
+    elevated: "bg-card-hover border border-card-border shadow-card-hover",
+    accent: "bg-card border-2 border-accent shadow-accent",
+    outline: "bg-transparent border-2 border-card-border"
   };
 
   return (
     <div
       className={cn(
-        "rounded-2xl p-5",
-        "transition-all duration-300 ease-premium",
+        "rounded-xl p-5",
+        "transition-all duration-200 ease-premium",
         variantStyles[variant],
-        hover && "hover:shadow-card-hover hover:-translate-y-0.5 cursor-pointer",
+        hover && "hover:shadow-card-hover hover:border-accent/30",
         className
       )}
       {...props}
@@ -45,7 +45,7 @@ export function CardTitle({
   return (
     <Component 
       className={cn(
-        "text-sm font-semibold text-foreground-primary tracking-tight",
+        "text-sm font-bold text-foreground-primary tracking-tight uppercase",
         className
       )} 
       {...props} 
@@ -59,7 +59,7 @@ export function CardDescription({ className, ...props }: CardDescriptionProps) {
   return (
     <p 
       className={cn(
-        "text-xs text-foreground-tertiary leading-relaxed",
+        "text-xs text-foreground-tertiary font-medium",
         className
       )} 
       {...props} 
@@ -73,7 +73,7 @@ export function CardHeader({ className, ...props }: CardHeaderProps) {
   return (
     <div 
       className={cn(
-        "flex flex-col space-y-1.5 pb-4",
+        "flex flex-col space-y-1.5 pb-4 border-b border-card-border",
         className
       )} 
       {...props} 
@@ -84,7 +84,7 @@ export function CardHeader({ className, ...props }: CardHeaderProps) {
 interface CardContentProps extends HTMLAttributes<HTMLDivElement> {}
 
 export function CardContent({ className, ...props }: CardContentProps) {
-  return <div className={cn("pt-0", className)} {...props} />;
+  return <div className={cn("pt-4", className)} {...props} />;
 }
 
 interface CardFooterProps extends HTMLAttributes<HTMLDivElement> {}
@@ -94,7 +94,7 @@ export function CardFooter({ className, ...props }: CardFooterProps) {
     <div 
       className={cn(
         "flex items-center pt-4 mt-4",
-        "border-t border-white/[0.04]",
+        "border-t border-card-border",
         className
       )} 
       {...props} 

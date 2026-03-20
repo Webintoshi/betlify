@@ -3,7 +3,7 @@
 import type { ButtonHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
-type ButtonVariant = "default" | "secondary" | "ghost" | "danger" | "outline" | "gradient";
+type ButtonVariant = "default" | "secondary" | "ghost" | "danger" | "outline";
 type ButtonSize = "sm" | "md" | "lg";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -16,63 +16,53 @@ const variantStyles: Record<ButtonVariant, string> = {
   default: [
     "bg-accent",
     "text-white",
-    "border border-accent",
+    "border-2 border-accent",
     "hover:bg-accent/90",
-    "hover:shadow-glow",
     "hover:border-accent-secondary",
-    "active:scale-[0.98]"
-  ].join(" "),
-  
-  gradient: [
-    "bg-gradient-to-r from-accent to-cyan",
-    "text-white",
-    "border-0",
-    "hover:shadow-glow-cyan",
-    "hover:opacity-95",
-    "active:scale-[0.98]"
+    "active:translate-y-[1px]",
+    "shadow-accent"
   ].join(" "),
   
   secondary: [
-    "bg-sky-500/10",
-    "text-sky-300",
-    "border border-sky-500/20",
-    "hover:bg-sky-500/20",
-    "hover:border-sky-500/30",
-    "active:scale-[0.98]"
+    "bg-card-hover",
+    "text-foreground-secondary",
+    "border-2 border-card-border",
+    "hover:border-accent/50",
+    "hover:text-accent",
+    "active:translate-y-[1px]"
   ].join(" "),
   
   outline: [
     "bg-transparent",
-    "text-sky-300",
-    "border border-sky-500/30",
-    "hover:bg-sky-500/10",
-    "hover:border-accent/50",
-    "active:scale-[0.98]"
+    "text-accent",
+    "border-2 border-accent",
+    "hover:bg-accent/10",
+    "active:translate-y-[1px]"
   ].join(" "),
   
   ghost: [
     "bg-transparent",
     "text-foreground-tertiary",
-    "border border-transparent",
-    "hover:bg-sky-500/10",
-    "hover:text-sky-300",
-    "active:scale-[0.98]"
+    "border-2 border-transparent",
+    "hover:text-accent",
+    "hover:bg-card",
+    "active:translate-y-[1px]"
   ].join(" "),
   
   danger: [
     "bg-error",
     "text-white",
-    "border border-error",
+    "border-2 border-error",
     "hover:bg-error/90",
-    "hover:shadow-lg hover:shadow-error/20",
-    "active:scale-[0.98]"
+    "active:translate-y-[1px]",
+    "shadow-success"
   ].join(" ")
 };
 
 const sizeStyles: Record<ButtonSize, string> = {
-  sm: "h-8 px-3 text-xs rounded-lg",
-  md: "h-10 px-4 text-sm rounded-xl",
-  lg: "h-12 px-6 text-sm rounded-xl"
+  sm: "h-8 px-4 text-xs rounded-md",
+  md: "h-10 px-5 text-sm rounded-lg",
+  lg: "h-12 px-6 text-sm rounded-lg"
 };
 
 export function Button({ 
@@ -88,10 +78,10 @@ export function Button({
     <button
       className={cn(
         "inline-flex items-center justify-center",
-        "font-medium",
-        "transition-all duration-200 ease-premium",
+        "font-bold uppercase tracking-wide",
+        "transition-all duration-150",
         "focus:outline-none focus:ring-2 focus:ring-accent/50 focus:ring-offset-2 focus:ring-offset-background",
-        "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:shadow-none disabled:active:scale-100",
+        "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:shadow-none disabled:active:translate-y-0",
         sizeStyles[size],
         variantStyles[variant],
         className
