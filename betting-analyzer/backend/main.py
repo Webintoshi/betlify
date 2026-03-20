@@ -646,6 +646,13 @@ def _save_predictions(client: Client, match_id: str, ev_result: Dict[str, Any]) 
             client.table("predictions").update(payload).eq("id", existing.data[0]["id"]).execute()
         else:
             client.table("predictions").insert(payload).execute()
+        best_market_name = str(best.get("market_type") or "")
+        client.table("matches").update(
+            {
+                "confidence_score": ev_result["confidence_score"],
+                "best_bet": best_market_name,
+            }
+        ).eq("id", str(match_id)).execute()
     except Exception:
         logger.exception("Prediction save failed.")
 
