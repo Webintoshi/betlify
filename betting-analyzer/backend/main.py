@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,7 @@ from pi_rating import calculate_pi_ratings
 from proxy_pool import ProxyPool, mask_proxy
 from scheduler import BettingScheduler
 from services.odds_scraper import get_service as get_odds_scraper_service
+from services.sofascore_collector import get_service as get_sofascore_collector_service
 from sofascore import get_service as get_sofascore_service, stable_uuid
 from transfermarkt import get_service as get_transfermarkt_service
 from weather import get_service as get_weather_service
@@ -48,6 +51,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 scheduler = BettingScheduler()
 api_football = get_api_service()
 odds_scraper = get_odds_scraper_service()
+sofascore_collector = get_sofascore_collector_service()
 sofascore = get_sofascore_service()
 transfermarkt_service = get_transfermarkt_service()
 weather_service = get_weather_service()
@@ -650,6 +654,294 @@ def _normalize_market_key(market_type: str) -> Optional[str]:
     if "over/under:under 3.5" in normalized:
         return "MS_U3.5"
     return None
+
+
+def _normalize_team_name_for_matching(team_name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(team_name or ""))
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-zA-Z0-9 ]+", " ", ascii_only)
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def _parse_threshold_from_market(market_type: str, token: str) -> Optional[float]:
+    prefix = f"{token}"
+    if not market_type.startswith(prefix):
+        return None
+    raw = market_type[len(prefix) :]
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _evaluate_prediction_hit(
+    market_type: str,
+    *,
+    home_score: int,
+    away_score: int,
+    ht_home: Optional[int] = None,
+    ht_away: Optional[int] = None,
+) -> Optional[bool]:
+    market = str(market_type or "").strip().upper()
+    if not market:
+        return None
+
+    total_goals = home_score + away_score
+    goal_diff = home_score - away_score
+
+    if market in {"MS1", "HCP_-0.5"}:
+        return home_score > away_score
+    if market == "MSX":
+        return home_score == away_score
+    if market == "MS2":
+        return away_score > home_score
+    if market in {"HCP_+0.5", "HCP_+1X"}:
+        return away_score >= home_score
+    if market == "KG_VAR":
+        return home_score > 0 and away_score > 0
+    if market == "KG_YOK":
+        return not (home_score > 0 and away_score > 0)
+
+    if market.startswith("MS_O"):
+        threshold = _parse_threshold_from_market(market, "MS_O")
+        if threshold is None:
+            return None
+        return float(total_goals) > threshold
+    if market.startswith("MS_U"):
+        threshold = _parse_threshold_from_market(market, "MS_U")
+        if threshold is None:
+            return None
+        return float(total_goals) < threshold
+
+    if market == "IY1":
+        if ht_home is None or ht_away is None:
+            return None
+        return ht_home > ht_away
+    if market == "IYX":
+        if ht_home is None or ht_away is None:
+            return None
+        return ht_home == ht_away
+    if market == "IY2":
+        if ht_home is None or ht_away is None:
+            return None
+        return ht_home < ht_away
+
+    if market.startswith("IY_O"):
+        if ht_home is None or ht_away is None:
+            return None
+        threshold = _parse_threshold_from_market(market, "IY_O")
+        if threshold is None:
+            return None
+        return float(ht_home + ht_away) > threshold
+    if market.startswith("IY_U"):
+        if ht_home is None or ht_away is None:
+            return None
+        threshold = _parse_threshold_from_market(market, "IY_U")
+        if threshold is None:
+            return None
+        return float(ht_home + ht_away) < threshold
+
+    if market.startswith("HCP_+"):
+        threshold = _parse_threshold_from_market(market, "HCP_+")
+        if threshold is None:
+            return None
+        return float(goal_diff) <= threshold
+    if market.startswith("HCP_-"):
+        threshold = _parse_threshold_from_market(market, "HCP_-")
+        if threshold is None:
+            return None
+        return float(goal_diff) > threshold
+
+    return None
+
+
+def _find_match_by_team_and_date(client: Client, historical_match: Dict[str, Any]) -> Optional[str]:
+    date_str = str(historical_match.get("date") or "")
+    home_name = _normalize_team_name_for_matching(str(historical_match.get("home_team") or ""))
+    away_name = _normalize_team_name_for_matching(str(historical_match.get("away_team") or ""))
+    if not date_str or not home_name or not away_name:
+        return None
+
+    try:
+        start_iso = f"{date_str}T00:00:00+00:00"
+        end_iso = f"{date_str}T23:59:59+00:00"
+        matches = (
+            client.table("matches")
+            .select("id,home_team_id,away_team_id,match_date")
+            .gte("match_date", start_iso)
+            .lte("match_date", end_iso)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+
+    team_ids = sorted(
+        {
+            str(row.get("home_team_id") or "")
+            for row in matches
+            if row.get("home_team_id")
+        }
+        | {
+            str(row.get("away_team_id") or "")
+            for row in matches
+            if row.get("away_team_id")
+        }
+    )
+    if not team_ids:
+        return None
+
+    try:
+        teams = client.table("teams").select("id,name").in_("id", team_ids).execute().data or []
+    except Exception:
+        return None
+    name_map = {str(row.get("id")): _normalize_team_name_for_matching(str(row.get("name") or "")) for row in teams}
+
+    for row in matches:
+        row_home = name_map.get(str(row.get("home_team_id") or ""), "")
+        row_away = name_map.get(str(row.get("away_team_id") or ""), "")
+        if row_home == home_name and row_away == away_name:
+            return str(row.get("id") or "")
+    return None
+
+
+def _fetch_latest_prediction_for_match(client: Client, match_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        rows = (
+            client.table("predictions")
+            .select("id,match_id,market_type,predicted_outcome,confidence_score,ev_percentage,recommended,created_at,kelly_pct")
+            .eq("match_id", match_id)
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    for row in rows:
+        if bool(row.get("recommended")):
+            return row
+    return rows[0]
+
+
+def _fetch_market_probability(client: Client, match_id: str, market_type: str) -> Optional[float]:
+    try:
+        rows = (
+            client.table("market_probabilities")
+            .select("probability")
+            .eq("match_id", match_id)
+            .eq("market", market_type)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    try:
+        return float(rows[0].get("probability"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_market_odd(client: Client, match_id: str, market_type: str) -> Optional[float]:
+    try:
+        rows = (
+            client.table("odds")
+            .select("odd,recorded_at")
+            .eq("match_id", match_id)
+            .eq("market", market_type)
+            .order("recorded_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            value = float(rows[0].get("odd"))
+            if value > 0:
+                return round(value, 4)
+    except Exception:
+        pass
+
+    try:
+        rows = (
+            client.table("odds_history")
+            .select("current_odd,closing_odd,opening_odd,recorded_at")
+            .eq("match_id", match_id)
+            .eq("market_type", market_type)
+            .order("recorded_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    odd = rows[0].get("current_odd") or rows[0].get("closing_odd") or rows[0].get("opening_odd")
+    try:
+        value = float(odd)
+    except (TypeError, ValueError):
+        return None
+    return round(value, 4) if value > 0 else None
+
+
+def _compute_backtest_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    evaluated_rows = [row for row in rows if row.get("hit") is not None]
+    total = len(rows)
+    evaluated = len(evaluated_rows)
+    hits = len([row for row in evaluated_rows if row.get("hit") is True])
+    misses = len([row for row in evaluated_rows if row.get("hit") is False])
+    unresolved = total - evaluated
+
+    total_pnl = round(
+        sum(float(row.get("profit_units", 0.0) or 0.0) for row in evaluated_rows),
+        4,
+    )
+    roi_pct = round((total_pnl / evaluated) * 100.0, 2) if evaluated > 0 else 0.0
+    hit_rate_pct = round((hits / evaluated) * 100.0, 2) if evaluated > 0 else 0.0
+
+    ev_values = [float(row.get("our_ev", 0.0) or 0.0) for row in rows]
+    avg_ev = round(sum(ev_values) / len(ev_values), 4) if ev_values else 0.0
+
+    by_market: Dict[str, Dict[str, Any]] = {}
+    for row in evaluated_rows:
+        market = str(row.get("our_market") or "UNKNOWN")
+        bucket = by_market.setdefault(
+            market,
+            {"market": market, "count": 0, "hits": 0, "misses": 0, "hit_rate_pct": 0.0},
+        )
+        bucket["count"] += 1
+        if row.get("hit") is True:
+            bucket["hits"] += 1
+        else:
+            bucket["misses"] += 1
+
+    for market in by_market.values():
+        if market["count"] > 0:
+            market["hit_rate_pct"] = round((market["hits"] / market["count"]) * 100.0, 2)
+
+    return {
+        "total_predictions": total,
+        "evaluated_predictions": evaluated,
+        "hits": hits,
+        "misses": misses,
+        "unresolved": unresolved,
+        "hit_rate_pct": hit_rate_pct,
+        "avg_ev": avg_ev,
+        "total_pnl_units": total_pnl,
+        "roi_pct": roi_pct,
+        "by_market": sorted(by_market.values(), key=lambda item: item["count"], reverse=True),
+    }
 
 
 def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
@@ -1376,6 +1668,111 @@ async def get_backfill_status() -> Dict[str, Any]:
         "finished_at": backfill_state.get("finished_at"),
         "last_error": backfill_state.get("last_error"),
         "last_result": backfill_state.get("last_result"),
+    }
+
+
+@app.post("/backtest/sofascore")
+async def run_sofascore_backtest(
+    days_back: int = Query(default=15, ge=1, le=60),
+    include_non_recommended: bool = Query(default=False),
+    limit_results: int = Query(default=200, ge=10, le=1000),
+) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    historical_matches = await sofascore_collector.collect_historical(days_back=days_back)
+    backtest_rows: List[Dict[str, Any]] = []
+    unmatched_count = 0
+    missing_prediction_count = 0
+
+    for historical in historical_matches:
+        event_id = int(historical.get("event_id", 0) or 0)
+        match_id = _resolve_sofascore_match_id(client, event_id) if event_id > 0 else None
+        if not match_id:
+            match_id = _find_match_by_team_and_date(client, historical)
+        if not match_id:
+            unmatched_count += 1
+            continue
+
+        prediction = _fetch_latest_prediction_for_match(client, match_id)
+        if not prediction:
+            missing_prediction_count += 1
+            continue
+        if not include_non_recommended and not bool(prediction.get("recommended")):
+            continue
+
+        market_type = str(prediction.get("market_type") or prediction.get("predicted_outcome") or "").strip().upper()
+        if not market_type:
+            continue
+
+        hit = _evaluate_prediction_hit(
+            market_type,
+            home_score=int(historical.get("home_score", 0) or 0),
+            away_score=int(historical.get("away_score", 0) or 0),
+            ht_home=(
+                int(historical.get("ht_home"))
+                if historical.get("ht_home") is not None
+                else None
+            ),
+            ht_away=(
+                int(historical.get("ht_away"))
+                if historical.get("ht_away") is not None
+                else None
+            ),
+        )
+        market_probability = _fetch_market_probability(client, match_id, market_type)
+        our_odd = _fetch_market_odd(client, match_id, market_type)
+        sofascore_odd = None
+        if isinstance(historical.get("odds"), dict):
+            try:
+                sofascore_odd = float(historical["odds"].get(market_type)) if historical["odds"].get(market_type) else None
+            except (TypeError, ValueError):
+                sofascore_odd = None
+        if our_odd is None and sofascore_odd is not None:
+            our_odd = round(float(sofascore_odd), 4)
+
+        profit_units: Optional[float] = None
+        if hit is True and our_odd is not None and our_odd > 1:
+            profit_units = round(our_odd - 1.0, 4)
+        elif hit is False:
+            profit_units = -1.0
+
+        backtest_rows.append(
+            {
+                "event_id": event_id,
+                "match_id": match_id,
+                "date": historical.get("date"),
+                "home_team": historical.get("home_team"),
+                "away_team": historical.get("away_team"),
+                "home_score": historical.get("home_score"),
+                "away_score": historical.get("away_score"),
+                "total_goals": historical.get("total_goals"),
+                "result": historical.get("result"),
+                "tournament": historical.get("tournament"),
+                "our_market": market_type,
+                "our_probability": market_probability,
+                "our_odd": our_odd,
+                "our_ev": float(prediction.get("ev_percentage", 0.0) or 0.0),
+                "recommended": bool(prediction.get("recommended")),
+                "hit": hit,
+                "profit_units": profit_units,
+                "sofascore_market_odd": sofascore_odd,
+            }
+        )
+
+    summary = _compute_backtest_summary(backtest_rows)
+    return {
+        "status": "ok",
+        "source": "sofascore",
+        "days_back": days_back,
+        "historical_matches": len(historical_matches),
+        "matched_predictions": len(backtest_rows),
+        "unmatched_matches": unmatched_count,
+        "missing_prediction_matches": missing_prediction_count,
+        "summary": summary,
+        "results": backtest_rows[:limit_results],
     }
 
 
