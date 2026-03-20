@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -955,6 +956,37 @@ async def test_sofascore_odds(sofascore_event_id: int) -> Dict[str, Any]:
         "saved_delta": odds_rows_after - odds_rows_before,
         "raw_json": raw_payload,
     }
+
+
+@app.get("/test/sofascore-debug")
+async def test_sofascore_debug() -> Dict[str, Any]:
+    cookie = os.getenv("SOFASCORE_COOKIE", "")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.sofascore.com/",
+        "Accept": "application/json",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://www.sofascore.com/api/v1/event/13981717/odds/1/all",
+                headers=headers,
+            )
+            return {
+                "cookie_set": bool(cookie),
+                "cookie_length": len(cookie),
+                "http_status": response.status_code,
+                "response_size": len(response.text),
+                "response_preview": response.text[:300],
+            }
+    except Exception as exc:
+        return {"error": str(exc), "cookie_set": bool(cookie)}
 
 
 @app.get("/test/sofascore/{date}")
