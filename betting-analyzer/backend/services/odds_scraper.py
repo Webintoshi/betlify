@@ -9,7 +9,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Dict, Optional, Tuple
 
-import httpx
+from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
@@ -23,15 +23,29 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.sofascore.com/",
-    "Accept": "application/json",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+    "Origin": "https://www.sofascore.com",
+    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
     "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Connection": "keep-alive",
 }
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent.parent / ".env")
 load_dotenv(BASE_DIR.parent / ".env", override=True)
+
+SOFASCORE_COOKIE = os.getenv("SOFASCORE_COOKIE", "").strip()
+if SOFASCORE_COOKIE:
+    HEADERS["Cookie"] = SOFASCORE_COOKIE
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
@@ -152,10 +166,8 @@ class OddsScraperService:
         self,
         *,
         supabase_client: Optional[Client] = None,
-        http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self.supabase = supabase_client or self._build_supabase_client()
-        self.http_client = http_client or httpx.AsyncClient(timeout=15.0, headers=HEADERS)
         self._rate_lock = asyncio.Lock()
         self._last_request_ts = 0.0
         self._odds_table_available: Optional[bool] = None
@@ -186,11 +198,17 @@ class OddsScraperService:
         for attempt in range(1, 4):
             await self._respect_rate_limit()
             try:
-                response = await self.http_client.get(url)
+                async with AsyncSession(impersonate="chrome120") as session:
+                    response = await session.get(url, headers=HEADERS, timeout=20)
             except Exception as exc:
                 logger.warning("Sofascore odds request failed. event_id=%s attempt=%s err=%s", event_id, attempt, exc)
                 if attempt < 3:
                     await asyncio.sleep(0.8 * attempt)
+                continue
+
+            if response.status_code == 429:
+                logger.warning("Sofascore odds 429. event_id=%s attempt=%s", event_id, attempt)
+                await asyncio.sleep(60)
                 continue
 
             if response.status_code == 200:
@@ -455,7 +473,7 @@ class OddsScraperService:
         return {"processed_matches": processed, "updated_markets": markets_updated}
 
     async def close(self) -> None:
-        await self.http_client.aclose()
+        return None
 
 
 _default_service = OddsScraperService()
