@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 from config_markets import MIN_CONFIDENCE_SCORE, VALID_MARKETS
+from services.confidence import confidence_score
 from services.dixon_coles import compute_ht_probs, compute_match_probs
 from services.ev_engine import evaluate_market
 from services.odds_processor import get_best_odd
@@ -76,46 +77,16 @@ def build_lambda(match_data: Dict[str, Any]) -> Tuple[float, float, float, float
     return round(lam_home, 4), round(lam_away, 4), ht_lam_home, ht_lam_away
 
 
-def confidence_score(match_data: Dict[str, Any], probabilities: Dict[str, float], bookmaker_odds: List[Dict[str, Any]]) -> float:
-    score = 50.0
-
-    home_stats = match_data.get("home_team_stats", {}) or {}
-    away_stats = match_data.get("away_team_stats", {}) or {}
-
-    if len(home_stats.get("last6", [])) >= 5:
-        score += 8
-    if len(away_stats.get("last6", [])) >= 5:
-        score += 8
-    if (match_data.get("h2h", {}) or {}).get("matches"):
-        score += 5
-    if home_stats.get("avg_xg_for"):
-        score += 7
-    if away_stats.get("avg_xg_for"):
-        score += 7
-
-    if len(bookmaker_odds) >= 3:
-        score += 5
-    if len(bookmaker_odds) >= 6:
-        score += 5
-
-    ms_total = (
-        _safe_float(probabilities.get("MS1"))
-        + _safe_float(probabilities.get("MSX"))
-        + _safe_float(probabilities.get("MS2"))
-    )
-    drift = abs(ms_total - 1.0)
-    score -= drift * 30.0
-
-    return round(max(0.0, min(score, 100.0)), 1)
-
-
 def run_analysis(match_data: Dict[str, Any], bookmaker_odds: List[Dict[str, Any]]) -> Dict[str, Any]:
     lam_h, lam_a, ht_lam_h, ht_lam_a = build_lambda(match_data)
+    match_data["_lambda_home"] = lam_h
+    match_data["_lambda_away"] = lam_a
+
     ft_probs = compute_match_probs(lam_h, lam_a)
     ht_probs = compute_ht_probs(ht_lam_h, ht_lam_a)
     all_probs = {**ft_probs, **ht_probs}
 
-    conf = confidence_score(match_data, all_probs, bookmaker_odds)
+    conf, conf_reasons = confidence_score(match_data, all_probs, bookmaker_odds)
 
     results: List[Dict[str, Any]] = []
     for market in VALID_MARKETS:
@@ -145,6 +116,7 @@ def run_analysis(match_data: Dict[str, Any], bookmaker_odds: List[Dict[str, Any]
     return {
         "match_id": match_data.get("match_id"),
         "confidence_score": conf,
+        "confidence_detail": conf_reasons,
         "lambda": {
             "home": lam_h,
             "away": lam_a,

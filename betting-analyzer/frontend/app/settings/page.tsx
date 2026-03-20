@@ -52,7 +52,7 @@ function ApiStatusRow({
 
 export default function SettingsPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [minimumConfidence, setMinimumConfidence] = useState<number>(60);
+  const [minimumConfidence, setMinimumConfidence] = useState<number>(51);
   const [minimumEv, setMinimumEv] = useState<number>(5);
   const [trackedLeagues, setTrackedLeagues] = useState<number[]>([203, 39, 140, 135, 78, 61]);
   const [statusMessage, setStatusMessage] = useState<string>("");

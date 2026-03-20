@@ -52,7 +52,7 @@ function SummaryCard({
 export default function DashboardPage() {
   const [matches, setMatches] = useState<DashboardMatch[]>([]);
   const [selectedLeague, setSelectedLeague] = useState<string>("all");
-  const [minConfidence, setMinConfidence] = useState<number>(60);
+  const [minConfidence, setMinConfidence] = useState<number>(51);
   const [selectedMatches, setSelectedMatches] = useState<Set<string>>(new Set());
   const [weeklyAccuracy, setWeeklyAccuracy] = useState<number>(0);
   const [totalCoupons, setTotalCoupons] = useState<number>(0);

@@ -65,6 +65,17 @@ backfill_state: Dict[str, Any] = {
     "last_result": None,
     "last_error": None,
 }
+reset_refetch_task: Optional[asyncio.Task[Any]] = None
+reset_refetch_state: Dict[str, Any] = {
+    "status": "idle",
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "processed": 0,
+    "success": 0,
+    "failed": 0,
+    "last_error": None,
+}
 
 
 @asynccontextmanager
@@ -182,6 +193,95 @@ async def _run_full_backfill() -> None:
     except Exception as exc:
         logger.exception("Full backfill basarisiz.")
         backfill_state.update(
+            {
+                "status": "failed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "last_error": str(exc),
+            }
+        )
+
+
+async def _run_reset_and_refetch() -> None:
+    reset_refetch_state.update(
+        {
+            "status": "running",
+            "running": True,
+            "started_at": datetime.now(scheduler.timezone).isoformat(),
+            "finished_at": None,
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "last_error": None,
+        }
+    )
+    try:
+        client = get_supabase_client()
+        try:
+            client.table("predictions").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        except Exception:
+            logger.warning("Prediction reset skipped.")
+        try:
+            client.table("market_probabilities").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        except Exception:
+            logger.warning("Market probability reset skipped.")
+
+        now = datetime.now(scheduler.timezone)
+        try:
+            matches = (
+                client.table("matches")
+                .select("id,match_date,status")
+                .gte("match_date", (now - timedelta(days=1)).isoformat())
+                .order("match_date")
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            matches = []
+
+        eligible = [
+            row
+            for row in matches
+            if str(row.get("status", "scheduled")).lower() in {"scheduled", "upcoming", "notstarted", "ns"}
+        ]
+
+        success = 0
+        failed = 0
+        for idx, match in enumerate(eligible, start=1):
+            match_id = str(match.get("id") or "").strip()
+            if not match_id:
+                continue
+            try:
+                await _run_match_analysis(match_id, confidence_threshold=51.0, include_details=False, refresh_live=False)
+                success += 1
+            except Exception:
+                failed += 1
+                logger.exception("Reset-refetch analyze failed. match_id=%s", match_id)
+
+            reset_refetch_state.update(
+                {
+                    "processed": idx,
+                    "success": success,
+                    "failed": failed,
+                }
+            )
+
+        reset_refetch_state.update(
+            {
+                "status": "completed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "processed": len(eligible),
+                "success": success,
+                "failed": failed,
+                "last_error": None,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Reset-refetch failed.")
+        reset_refetch_state.update(
             {
                 "status": "failed",
                 "running": False,
@@ -1741,6 +1841,7 @@ async def _run_match_analysis(
         "confidence_score": round(engine_confidence, 2),
         "recommended": bool(ev_result.get("recommended", False)),
         "engine": str((engine_result.get("meta", {}) or {}).get("model", "Dixon-Coles v2.0")),
+        "confidence_detail": engine_result.get("confidence_detail", {}),
     }
     _save_market_probabilities(client, resolved_match_id, probabilities, lambda_payload)
     _save_predictions(client, resolved_match_id, ev_result, lambda_payload=lambda_payload)
@@ -1756,6 +1857,7 @@ async def _run_match_analysis(
         },
         "confidence_score": round(engine_confidence, 2),
         "analysis": analysis,
+        "confidence_detail": engine_result.get("confidence_detail", {}),
         "ev": ev_result,
         "recommended_market": {
             **best_market,
@@ -1884,6 +1986,44 @@ async def get_backfill_status() -> Dict[str, Any]:
         "finished_at": backfill_state.get("finished_at"),
         "last_error": backfill_state.get("last_error"),
         "last_result": backfill_state.get("last_result"),
+    }
+
+
+@app.post("/admin/reset-and-refetch")
+async def reset_and_refetch() -> Dict[str, Any]:
+    global reset_refetch_task
+    if reset_refetch_task is not None and not reset_refetch_task.done():
+        return {"status": "running", "message": "Reset/refetch zaten calisiyor"}
+    reset_refetch_task = asyncio.create_task(_run_reset_and_refetch())
+    return {
+        "status": "reset_started",
+        "message": "Tum analizler temizlendi, yeni motorla yeniden hesaplama basladi",
+    }
+
+
+@app.get("/admin/stats")
+async def admin_stats() -> Dict[str, Any]:
+    backfill_running = backfill_task is not None and not backfill_task.done()
+    reset_running = reset_refetch_task is not None and not reset_refetch_task.done()
+    return {
+        "backfill": {
+            "status": backfill_state.get("status"),
+            "running": backfill_state.get("running") or backfill_running,
+            "started_at": backfill_state.get("started_at"),
+            "finished_at": backfill_state.get("finished_at"),
+            "last_error": backfill_state.get("last_error"),
+            "last_result": backfill_state.get("last_result"),
+        },
+        "reset_refetch": {
+            "status": reset_refetch_state.get("status"),
+            "running": reset_refetch_state.get("running") or reset_running,
+            "started_at": reset_refetch_state.get("started_at"),
+            "finished_at": reset_refetch_state.get("finished_at"),
+            "processed": reset_refetch_state.get("processed"),
+            "success": reset_refetch_state.get("success"),
+            "failed": reset_refetch_state.get("failed"),
+            "last_error": reset_refetch_state.get("last_error"),
+        },
     }
 
 
