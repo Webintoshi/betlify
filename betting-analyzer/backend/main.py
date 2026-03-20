@@ -1359,6 +1359,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
             confidence_threshold=min_confidence,
         )
         best_market = ev.get("best_market") or {}
+        recommended_flag = bool(best_market.get("recommended", ev.get("recommended", False)))
         items.append(
             {
                 "match_id": row["id"],
@@ -1368,7 +1369,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
                 "home_team": teams_map.get(row["home_team_id"], "Home Team"),
                 "away_team": teams_map.get(row["away_team_id"], "Away Team"),
                 "confidence_score": analysis["confidence_score"],
-                "recommended": analysis["recommended"],
+                "recommended": recommended_flag,
                 "market_type": best_market.get("market_type", "MS1"),
                 "ev_percentage": best_market.get("ev_percentage", 0.0),
             }
