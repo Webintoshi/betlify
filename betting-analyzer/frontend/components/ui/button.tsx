@@ -18,35 +18,35 @@ const variantStyles: Record<ButtonVariant, string> = {
     "text-white",
     "border border-accent",
     "hover:bg-accent/90",
-    "hover:shadow-glow-sm",
+    "hover:shadow-glow",
     "hover:border-accent-secondary",
     "active:scale-[0.98]"
   ].join(" "),
   
   gradient: [
-    "bg-gradient-to-r from-accent to-accent-secondary",
+    "bg-gradient-to-r from-accent to-cyan",
     "text-white",
     "border-0",
-    "hover:shadow-glow",
+    "hover:shadow-glow-cyan",
     "hover:opacity-95",
     "active:scale-[0.98]"
   ].join(" "),
   
   secondary: [
-    "bg-white/[0.06]",
-    "text-foreground-secondary",
-    "border border-white/[0.08]",
-    "hover:bg-white/[0.1]",
-    "hover:border-white/[0.12]",
+    "bg-sky-500/10",
+    "text-sky-300",
+    "border border-sky-500/20",
+    "hover:bg-sky-500/20",
+    "hover:border-sky-500/30",
     "active:scale-[0.98]"
   ].join(" "),
   
   outline: [
     "bg-transparent",
-    "text-foreground-secondary",
-    "border border-white/[0.15]",
-    "hover:bg-white/[0.04]",
-    "hover:border-accent/30",
+    "text-sky-300",
+    "border border-sky-500/30",
+    "hover:bg-sky-500/10",
+    "hover:border-accent/50",
     "active:scale-[0.98]"
   ].join(" "),
   
@@ -54,8 +54,8 @@ const variantStyles: Record<ButtonVariant, string> = {
     "bg-transparent",
     "text-foreground-tertiary",
     "border border-transparent",
-    "hover:bg-white/[0.04]",
-    "hover:text-foreground-secondary",
+    "hover:bg-sky-500/10",
+    "hover:text-sky-300",
     "active:scale-[0.98]"
   ].join(" "),
   

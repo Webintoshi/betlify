@@ -26,7 +26,7 @@ function SummaryCard({
   return (
     <Card hover className="relative overflow-hidden">
       {/* Background decoration */}
-      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-accent/5 to-transparent rounded-bl-full" />
+      <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-accent/10 to-transparent rounded-bl-full" />
       
       <div className="relative">
         <div className="flex items-start justify-between">
@@ -49,7 +49,7 @@ function SummaryCard({
             </Badge>
           )}
         </div>
-        <p className="mt-2 text-xs text-foreground-muted">{subtitle}</p>
+        <p className="mt-2 text-xs text-slate-500">{subtitle}</p>
       </div>
     </Card>
   );
@@ -132,19 +132,19 @@ export default function DashboardPage() {
         <div>
           <div className="flex items-center gap-3 mb-2">
             <Badge variant="accent" size="sm">V2.0</Badge>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-foreground-muted">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">
               Betlify
             </p>
           </div>
           <h1 className="text-display-sm text-foreground-primary">
             Dashboard
           </h1>
-          <p className="mt-1 text-sm text-foreground-tertiary">
+          <p className="mt-1 text-sm text-slate-400">
             Günlük maç analizleri ve istatistikler
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-foreground-muted">
-          <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+        <div className="flex items-center gap-2 text-xs text-sky-400">
+          <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
           Canlı veri akışı aktif
         </div>
       </div>
@@ -207,7 +207,7 @@ export default function DashboardPage() {
         <div className="grid gap-5 md:grid-cols-2">
           {/* League Filter */}
           <div className="space-y-2">
-            <label className="text-sm font-medium text-foreground-secondary">
+            <label className="text-sm font-medium text-slate-300">
               Lig Seçimi
             </label>
             <div className="relative">
@@ -215,7 +215,7 @@ export default function DashboardPage() {
                 value={selectedLeague}
                 onChange={(event) => setSelectedLeague(event.target.value)}
                 className={cn(
-                  "w-full rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm text-foreground-secondary",
+                  "w-full rounded-xl border border-sky-500/20 bg-slate-800/50 px-4 py-3 text-sm text-slate-200",
                   "focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/30",
                   "transition-all duration-200"
                 )}
@@ -235,7 +235,7 @@ export default function DashboardPage() {
           {/* Confidence Filter */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-foreground-secondary">
+              <label className="text-sm font-medium text-slate-300">
                 Minimum Güven Skoru
               </label>
               <Badge variant="accent" size="sm">
@@ -252,7 +252,7 @@ export default function DashboardPage() {
                 onChange={(event) => setMinConfidence(Number(event.target.value))}
                 className="w-full"
               />
-              <div className="flex justify-between mt-2 text-[10px] text-foreground-muted">
+              <div className="flex justify-between mt-2 text-[10px] text-slate-500">
                 <span>40%</span>
                 <span>90%</span>
               </div>
@@ -264,7 +264,7 @@ export default function DashboardPage() {
       {/* Loading State */}
       {loading && (
         <div className="flex items-center justify-center py-12">
-          <div className="flex items-center gap-3 text-foreground-tertiary">
+          <div className="flex items-center gap-3 text-slate-400">
             <svg className="animate-spin h-5 w-5 text-accent" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -277,11 +277,11 @@ export default function DashboardPage() {
       {/* Error State */}
       {error && (
         <div className="rounded-2xl bg-error/10 border border-error/20 p-4 flex items-start gap-3">
-          <svg className="w-5 h-5 text-error flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="w-5 h-5 text-error-bright flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <div>
-            <p className="text-sm font-medium text-error">Bir hata oluştu</p>
+            <p className="text-sm font-medium text-error-bright">Bir hata oluştu</p>
             <p className="text-xs text-error/70 mt-1">{error}</p>
           </div>
         </div>
@@ -292,7 +292,7 @@ export default function DashboardPage() {
         <>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-foreground-primary">
+              <h2 className="text-lg font-bold text-foreground-primary">
                 Maç Listesi
               </h2>
               <Badge variant="neutral" size="sm">
@@ -320,16 +320,16 @@ export default function DashboardPage() {
           {!filteredMatches.length && (
             <Card className="text-center py-12">
               <div className="flex flex-col items-center gap-4">
-                <div className="w-16 h-16 rounded-full bg-white/[0.04] flex items-center justify-center">
-                  <svg className="w-8 h-8 text-foreground-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="w-16 h-16 rounded-full bg-sky-500/10 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-foreground-secondary">
+                  <p className="text-sm font-medium text-slate-300">
                     Filtrelere uygun maç bulunamadı
                   </p>
-                  <p className="text-xs text-foreground-muted mt-1">
+                  <p className="text-xs text-slate-500 mt-1">
                     Farklı filtreler deneyin
                   </p>
                 </div>

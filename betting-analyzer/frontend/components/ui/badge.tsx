@@ -12,42 +12,43 @@ interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 
 const variantStyles: Record<BadgeVariant, string> = {
   neutral: [
-    "bg-white/[0.06]",
-    "text-foreground-secondary",
-    "border border-white/[0.08]"
+    "bg-sky-500/10",
+    "text-sky-300",
+    "border border-sky-500/20"
   ].join(" "),
   
   accent: [
-    "bg-accent/15",
+    "bg-accent/20",
     "text-accent",
-    "border border-accent/25"
+    "border border-accent/40",
+    "shadow-[0_0_12px_rgba(14,165,233,0.2)]"
   ].join(" "),
   
   success: [
-    "bg-success/15",
-    "text-success",
-    "border border-success/25",
-    "shadow-[0_0_12px_rgba(16,185,129,0.15)]"
+    "bg-success/20",
+    "text-success-bright",
+    "border border-success/30",
+    "shadow-[0_0_12px_rgba(16,185,129,0.2)]"
   ].join(" "),
   
   warning: [
-    "bg-warning/15",
-    "text-warning",
-    "border border-warning/25",
-    "shadow-[0_0_12px_rgba(245,158,11,0.15)]"
+    "bg-warning/20",
+    "text-warning-bright",
+    "border border-warning/30",
+    "shadow-[0_0_12px_rgba(245,158,11,0.2)]"
   ].join(" "),
   
   error: [
-    "bg-error/15",
-    "text-error",
-    "border border-error/25",
-    "shadow-[0_0_12px_rgba(244,63,94,0.15)]"
+    "bg-error/20",
+    "text-error-bright",
+    "border border-error/30",
+    "shadow-[0_0_12px_rgba(239,68,68,0.2)]"
   ].join(" "),
   
   outline: [
     "bg-transparent",
     "text-foreground-tertiary",
-    "border border-white/[0.15]"
+    "border border-sky-500/30"
   ].join(" ")
 };
 
@@ -57,12 +58,12 @@ const sizeStyles: Record<BadgeSize, string> = {
 };
 
 const dotColors: Record<BadgeVariant, string> = {
-  neutral: "bg-foreground-muted",
+  neutral: "bg-sky-400",
   accent: "bg-accent",
-  success: "bg-success",
-  warning: "bg-warning",
-  error: "bg-error",
-  outline: "bg-foreground-muted"
+  success: "bg-success-bright",
+  warning: "bg-warning-bright",
+  error: "bg-error-bright",
+  outline: "bg-sky-400"
 };
 
 export function Badge({ 

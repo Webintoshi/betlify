@@ -43,12 +43,12 @@ export default function MatchCard({ match, isSelected, onAdd }: MatchCardProps) 
       className={cn(
         "relative overflow-hidden transition-all duration-500",
         weak && "opacity-60",
-        strong && "border-success/30 shadow-success"
+        strong && "border-success/40 shadow-success"
       )}
     >
       {/* Background gradient for strong matches */}
       {strong && (
-        <div className="absolute inset-0 bg-gradient-to-br from-success/5 via-transparent to-transparent pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-br from-success/10 via-transparent to-transparent pointer-events-none" />
       )}
 
       {/* Content */}
@@ -57,12 +57,12 @@ export default function MatchCard({ match, isSelected, onAdd }: MatchCardProps) 
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-lg">🏆</span>
-              <p className="text-xs font-medium uppercase tracking-wider text-foreground-tertiary truncate">
+              <span className="text-lg">⚽</span>
+              <p className="text-xs font-semibold uppercase tracking-wider text-sky-400 truncate">
                 {match.league}
               </p>
             </div>
-            <div className="flex items-center gap-2 text-xs text-foreground-muted">
+            <div className="flex items-center gap-2 text-xs text-slate-400">
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
@@ -81,44 +81,44 @@ export default function MatchCard({ match, isSelected, onAdd }: MatchCardProps) 
         {/* Teams */}
         <div className="text-center py-2">
           <div className="flex items-center justify-center gap-3">
-            <span className="text-base font-semibold text-foreground-primary text-right flex-1 truncate">
+            <span className="text-base font-bold text-foreground-primary text-right flex-1 truncate">
               {match.home_team}
             </span>
-            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.06]">
-              <span className="text-xs font-bold text-foreground-tertiary">VS</span>
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-accent/20 border border-accent/30">
+              <span className="text-xs font-bold text-accent">VS</span>
             </div>
-            <span className="text-base font-semibold text-foreground-primary text-left flex-1 truncate">
+            <span className="text-base font-bold text-foreground-primary text-left flex-1 truncate">
               {match.away_team}
             </span>
           </div>
         </div>
 
         {/* Analysis Box */}
-        <div className="rounded-xl border border-white/[0.05] bg-white/[0.02] p-4 space-y-3">
+        <div className="rounded-xl border border-sky-500/10 bg-sky-500/5 p-4 space-y-3">
           {/* Market Type */}
           <div className="flex items-center justify-between">
-            <span className="text-sm text-foreground-tertiary">Öneri</span>
-            <span className="text-sm font-semibold text-foreground-primary">
+            <span className="text-sm text-slate-400">Öneri</span>
+            <span className="text-sm font-bold text-accent">
               {match.market_type}
             </span>
           </div>
 
           {/* EV Value */}
           <div className="flex items-center justify-between">
-            <span className="text-sm text-foreground-tertiary">EV Değeri</span>
+            <span className="text-sm text-slate-400">EV Değeri</span>
             <span className={cn(
               "text-sm font-bold",
-              match.ev_percentage >= 0 ? "text-success" : "text-error"
+              match.ev_percentage >= 0 ? "text-success-bright" : "text-error-bright"
             )}>
               {evText(match.ev_percentage)}
             </span>
           </div>
 
           {/* Confidence */}
-          <div className="pt-2 border-t border-white/[0.04]">
+          <div className="pt-2 border-t border-sky-500/10">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <span className="text-xs text-foreground-tertiary">Güven Skoru</span>
+                <span className="text-xs text-slate-400">Güven Skoru</span>
                 <Badge variant={confidenceVariant} size="sm">
                   {getConfidenceLabel(confidence)}
                 </Badge>

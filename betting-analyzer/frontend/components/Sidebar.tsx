@@ -50,23 +50,23 @@ export function Sidebar() {
   return (
     <>
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex w-72 shrink-0 flex-col border-r border-white/[0.04] bg-card/50 backdrop-blur-2xl">
+      <aside className="hidden md:flex w-72 shrink-0 flex-col border-r border-sky-500/10 bg-slate-900/50 backdrop-blur-2xl">
         {/* Logo Section */}
-        <div className="p-6 border-b border-white/[0.04]">
-          <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-accent/20 to-accent-secondary/10 p-5 border border-accent/20">
+        <div className="p-6 border-b border-sky-500/10">
+          <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-accent/20 to-cyan/10 p-5 border border-accent/30">
             {/* Glow effect */}
-            <div className="absolute -top-10 -right-10 w-20 h-20 bg-accent/30 rounded-full blur-2xl" />
-            <div className="absolute -bottom-10 -left-10 w-16 h-16 bg-accent-secondary/20 rounded-full blur-xl" />
+            <div className="absolute -top-10 -right-10 w-20 h-20 bg-accent/40 rounded-full blur-2xl" />
+            <div className="absolute -bottom-10 -left-10 w-16 h-16 bg-cyan/30 rounded-full blur-xl" />
             
             <div className="relative">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-accent">
+              <p className="text-xs font-bold uppercase tracking-[0.25em] text-accent">
                 Betlify
               </p>
               <h1 className="mt-2 text-2xl font-bold text-white tracking-tight">
                 Bahis Paneli
               </h1>
-              <p className="mt-1 text-xs text-foreground-tertiary">
-                Premium Analiz Platformu
+              <p className="mt-1 text-xs text-sky-300/70">
+                Akıllı Analiz Platformu
               </p>
             </div>
           </div>
@@ -74,7 +74,7 @@ export function Sidebar() {
 
         {/* Navigation */}
         <nav className="flex-1 p-4 space-y-1">
-          {navItems.map((item, index) => {
+          {navItems.map((item) => {
             const active = pathname.startsWith(item.href);
             return (
               <Link
@@ -85,28 +85,27 @@ export function Sidebar() {
                   "relative overflow-hidden",
                   active 
                     ? [
-                        "bg-accent/10 text-white",
-                        "border border-accent/30",
-                        "shadow-[0_0_20px_rgba(99,102,241,0.15)]"
+                        "bg-accent/15 text-white",
+                        "border border-accent/40",
+                        "shadow-[0_0_20px_rgba(14,165,233,0.2)]"
                       ].join(" ")
                     : [
-                        "text-foreground-tertiary",
-                        "hover:bg-white/[0.04]",
-                        "hover:text-foreground-secondary",
+                        "text-slate-400",
+                        "hover:bg-sky-500/10",
+                        "hover:text-sky-300",
                         "border border-transparent"
                       ].join(" ")
                 )}
               >
                 {/* Active indicator line */}
                 {active && (
-                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-gradient-to-b from-accent to-accent-secondary rounded-r-full" />
+                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-gradient-to-b from-accent to-cyan rounded-r-full" />
                 )}
                 
                 {/* Icon */}
                 <span className={cn(
-                  "transition-transform duration-300",
-                  active ? "text-accent" : "text-foreground-muted group-hover:text-foreground-secondary",
-                  "group-hover:scale-110"
+                  "transition-all duration-300",
+                  active ? "text-accent scale-110" : "text-slate-500 group-hover:text-accent group-hover:scale-110"
                 )}>
                   {item.icon}
                 </span>
@@ -122,7 +121,7 @@ export function Sidebar() {
 
                 {/* Active glow */}
                 {active && (
-                  <span className="absolute inset-0 bg-gradient-to-r from-accent/5 to-transparent pointer-events-none" />
+                  <span className="absolute inset-0 bg-gradient-to-r from-accent/10 to-transparent pointer-events-none" />
                 )}
               </Link>
             );
@@ -130,13 +129,13 @@ export function Sidebar() {
         </nav>
 
         {/* Footer Info */}
-        <div className="p-4 border-t border-white/[0.04]">
-          <div className="rounded-xl bg-white/[0.02] p-4 border border-white/[0.04]">
+        <div className="p-4 border-t border-sky-500/10">
+          <div className="rounded-xl bg-sky-500/5 p-4 border border-sky-500/10">
             <div className="flex items-center gap-2 mb-2">
               <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-              <span className="text-xs font-medium text-foreground-secondary">Sistem Aktif</span>
+              <span className="text-xs font-medium text-sky-300">Sistem Aktif</span>
             </div>
-            <p className="text-[10px] text-foreground-muted">
+            <p className="text-[10px] text-slate-500">
               Son güncelleme: {new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
             </p>
           </div>
@@ -146,21 +145,21 @@ export function Sidebar() {
       {/* Mobile Navigation */}
       <nav className="sticky top-0 z-50 md:hidden">
         {/* Header */}
-        <div className="px-4 py-3 border-b border-white/[0.04] bg-background/95 backdrop-blur-xl">
+        <div className="px-4 py-3 border-b border-sky-500/10 bg-slate-900/95 backdrop-blur-xl">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-semibold text-white">Betlify</p>
-              <p className="text-[10px] text-foreground-muted">Premium Analiz</p>
+              <p className="text-sm font-bold text-white">Betlify</p>
+              <p className="text-[10px] text-sky-400">Akıllı Analiz</p>
             </div>
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-              <span className="text-xs text-foreground-tertiary">Aktif</span>
+              <span className="text-xs text-sky-400">Aktif</span>
             </div>
           </div>
         </div>
         
         {/* Tab Navigation */}
-        <div className="px-4 py-2 border-b border-white/[0.04] bg-card/80 backdrop-blur-xl overflow-x-auto">
+        <div className="px-4 py-2 border-b border-sky-500/10 bg-slate-900/80 backdrop-blur-xl overflow-x-auto">
           <div className="flex gap-2">
             {navItems.map((item) => {
               const active = pathname.startsWith(item.href);
@@ -171,11 +170,11 @@ export function Sidebar() {
                   className={cn(
                     "flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-all duration-200",
                     active
-                      ? "bg-accent text-white shadow-glow-sm"
-                      : "bg-white/[0.04] text-foreground-tertiary hover:bg-white/[0.08]"
+                      ? "bg-accent text-white shadow-glow"
+                      : "bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
                   )}
                 >
-                  <span className={active ? "text-white" : "text-foreground-muted"}>
+                  <span className={active ? "text-white" : "text-accent"}>
                     {item.icon}
                   </span>
                   <span>{item.label}</span>

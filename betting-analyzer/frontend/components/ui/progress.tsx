@@ -14,11 +14,11 @@ interface ProgressProps {
 }
 
 const variantStyles: Record<ProgressVariant, string> = {
-  default: "bg-accent",
-  success: "bg-success shadow-[0_0_10px_rgba(16,185,129,0.4)]",
-  warning: "bg-warning shadow-[0_0_10px_rgba(245,158,11,0.4)]",
-  error: "bg-error shadow-[0_0_10px_rgba(244,63,94,0.4)]",
-  gradient: "bg-gradient-to-r from-accent to-accent-secondary"
+  default: "bg-gradient-to-r from-accent to-cyan shadow-[0_0_10px_rgba(14,165,233,0.4)]",
+  success: "bg-gradient-to-r from-success to-success-bright shadow-[0_0_10px_rgba(16,185,129,0.4)]",
+  warning: "bg-gradient-to-r from-warning to-warning-bright shadow-[0_0_10px_rgba(245,158,11,0.4)]",
+  error: "bg-gradient-to-r from-error to-error-bright shadow-[0_0_10px_rgba(239,68,68,0.4)]",
+  gradient: "bg-gradient-to-r from-accent via-cyan to-accent"
 };
 
 const sizeStyles = {
@@ -44,7 +44,7 @@ export function Progress({
       <div 
         className={cn(
           "w-full overflow-hidden rounded-full",
-          "bg-white/[0.06]",
+          "bg-sky-500/10",
           sizeStyles[size]
         )}
       >
@@ -60,9 +60,9 @@ export function Progress({
           {/* Shimmer effect */}
           {animated && percentage > 0 && (
             <div 
-              className="h-full w-full opacity-30"
+              className="h-full w-full opacity-40"
               style={{
-                background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)",
+                background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)",
                 backgroundSize: "200% 100%",
                 animation: "shimmer 2s infinite"
               }}
@@ -108,20 +108,20 @@ export function CircularProgress({
   const offset = circumference - (percentage / 100) * circumference;
   
   const variantColors: Record<ProgressVariant, string> = {
-    default: "#6366f1",
+    default: "url(#blueGradient)",
     success: "#10b981",
     warning: "#f59e0b",
-    error: "#f43f5e",
-    gradient: "url(#gradient)"
+    error: "#ef4444",
+    gradient: "url(#blueGradient)"
   };
 
   return (
     <div className={cn("relative inline-flex items-center justify-center", className)}>
       <svg width={size} height={size} className="-rotate-90">
         <defs>
-          <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#6366f1" />
-            <stop offset="100%" stopColor="#8b5cf6" />
+          <linearGradient id="blueGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#0ea5e9" />
+            <stop offset="100%" stopColor="#06b6d4" />
           </linearGradient>
         </defs>
         {/* Background circle */}
@@ -130,7 +130,7 @@ export function CircularProgress({
           cy={size / 2}
           r={radius}
           fill="none"
-          stroke="rgba(255,255,255,0.06)"
+          stroke="rgba(14, 165, 233, 0.1)"
           strokeWidth={strokeWidth}
         />
         {/* Progress circle */}
