@@ -12,31 +12,11 @@ export function Card({
   hover = false,
   ...props 
 }: CardProps) {
-  const variants = {
-    default: [
-      "bg-card/90",
-      "border border-white/[0.06]",
-      "shadow-card",
-      "backdrop-blur-xl"
-    ],
-    glass: [
-      "bg-white/[0.03]",
-      "border border-white/[0.08]",
-      "shadow-lg",
-      "backdrop-blur-2xl"
-    ],
-    elevated: [
-      "bg-card",
-      "border border-white/[0.06]",
-      "shadow-xl",
-      "backdrop-blur-xl"
-    ],
-    gradient: [
-      "bg-gradient-to-br from-card to-card/50",
-      "border border-accent/20",
-      "shadow-glow-sm",
-      "backdrop-blur-xl"
-    ]
+  const variantStyles = {
+    default: "bg-card/90 border border-white/[0.06] shadow-card backdrop-blur-xl",
+    glass: "bg-white/[0.03] border border-white/[0.08] shadow-lg backdrop-blur-2xl",
+    elevated: "bg-card border border-white/[0.06] shadow-xl backdrop-blur-xl",
+    gradient: "bg-gradient-to-br from-card to-card/50 border border-accent/20 shadow-glow-sm backdrop-blur-xl"
   };
 
   return (
@@ -44,7 +24,7 @@ export function Card({
       className={cn(
         "rounded-2xl p-5",
         "transition-all duration-300 ease-premium",
-        variants[variant],
+        variantStyles[variant],
         hover && "hover:shadow-card-hover hover:-translate-y-0.5 cursor-pointer",
         className
       )}
