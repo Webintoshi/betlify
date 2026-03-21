@@ -152,6 +152,42 @@ function TeamAvatar({ name }: { name: string }) {
   );
 }
 
+function SofaScoreLineupsEmbed({ eventId }: { eventId: number }) {
+  const iframeSrc = `https://widgets.sofascore.com/tr/embed/lineups?id=${eventId}&widgetTheme=dark`;
+  const matchUrl = `https://www.sofascore.com/tr/event/${eventId}`;
+
+  return (
+    <Card className="overflow-hidden border-accent/30 bg-gradient-to-b from-accent/5 to-transparent">
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle>SofaScore Kadrolar</CardTitle>
+          <Badge variant="accent" size="sm">CanlÄ± Widget</Badge>
+        </div>
+        <CardDescription>MaÃ§ kadrolarÄ± ve diziliÅŸler (SofaScore)</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0b1220]">
+          <iframe
+            id={`sofa-lineups-embed-${eventId}`}
+            title={`SofaScore lineups ${eventId}`}
+            src={iframeSrc}
+            className="mx-auto block w-full"
+            style={{ height: "786px", maxWidth: "800px" }}
+            frameBorder={0}
+            scrolling="no"
+            loading="lazy"
+          />
+        </div>
+        <p className="text-xs text-foreground-muted">
+          <a href={matchUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+            SofaScore Ã¼zerinde maÃ§ detayÄ±nÄ± aÃ§
+          </a>
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function MatchDetailsPage() {
   const params = useParams<{ id: string }>();
   const matchId = typeof params?.id === "string" ? params.id : "";
@@ -278,6 +314,11 @@ export default function MatchDetailsPage() {
     }
     return toNumber(away?.defense_xg, 0);
   }, [data]);
+  const sofascoreEventId = useMemo(() => {
+    const rawEventId = data?.sofascore?.event?.event_id;
+    const parsed = Number(rawEventId ?? 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }, [data]);
 
   const handleAddCoupon = () => {
     if (!data?.match || !data.recommended_market) {
@@ -386,6 +427,8 @@ export default function MatchDetailsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {sofascoreEventId > 0 ? <SofaScoreLineupsEmbed eventId={sofascoreEventId} /> : null}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
         {/* Left Column */}

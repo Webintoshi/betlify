@@ -233,6 +233,25 @@ export type MatchAnalysisResponse = {
       away: number;
     };
   };
+  sofascore?: {
+    enabled?: boolean;
+    event?: {
+      event_id?: number;
+      tournament_id?: number;
+      tournament_name?: string;
+      season_id?: number;
+      season_name?: string;
+    };
+    standings?: Array<Record<string, unknown>>;
+    season_team_stats?: {
+      home?: Record<string, unknown>;
+      away?: Record<string, unknown>;
+    };
+    top_players?: {
+      home?: Array<Record<string, unknown>>;
+      away?: Array<Record<string, unknown>>;
+    };
+  };
 };
 
 export type CouponSelectionPayload = {
