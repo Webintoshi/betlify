@@ -1753,6 +1753,44 @@ async def _run_match_analysis(
                         "ratio": round(home_wins / total, 4) if total > 0 else 0.5,
                     }
 
+        if home_sofascore_id > 0 and away_sofascore_id > 0 and should_refresh_enrichment and not h2h_matches:
+            away_name_norm = _normalize_team_name_for_matching(str(team_rows.get(away_team_id, {}).get("name", "")))
+            home_name_norm = _normalize_team_name_for_matching(str(team_rows.get(home_team_id, {}).get("name", "")))
+            home_history = await sofascore.get_team_recent_matches(home_sofascore_id, limit=30)
+            derived: List[Dict[str, Any]] = []
+            for item in home_history:
+                item_home = _normalize_team_name_for_matching(str(item.get("home_team_name", "")))
+                item_away = _normalize_team_name_for_matching(str(item.get("away_team_name", "")))
+                if not ((item_home == away_name_norm) or (item_away == away_name_norm)):
+                    continue
+                if not ((item_home == home_name_norm) or (item_away == home_name_norm)):
+                    continue
+                derived.append(item)
+            if derived:
+                h2h_matches = [
+                    {
+                        "date": str(row.get("date") or "")[:10],
+                        "match_date": row.get("date"),
+                        "home_team": row.get("home_team_name"),
+                        "away_team": row.get("away_team_name"),
+                        "home_goals": int(row.get("home_goals", 0) or 0),
+                        "away_goals": int(row.get("away_goals", 0) or 0),
+                        "league": row.get("league"),
+                        "is_cup": False,
+                    }
+                    for row in derived[:5]
+                ]
+                h2h_rows = [
+                    {
+                        "match_date": row.get("match_date"),
+                        "home_goals": int(row.get("home_goals", 0) or 0),
+                        "away_goals": int(row.get("away_goals", 0) or 0),
+                        "league": row.get("league"),
+                        "is_cup": bool(row.get("is_cup", False)),
+                    }
+                    for row in h2h_matches
+                ]
+
         should_backfill_team_stats = (
             not home_stats
             or not away_stats

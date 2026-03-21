@@ -1237,12 +1237,31 @@ class SofaScoreService:
                 rating = _safe_float(source_node.get("averageRating"), fallback=0.0)
             if rating <= 0:
                 rating = _safe_float(source_node.get("sofascoreRating"), fallback=0.0)
+            if rating <= 0:
+                nested_rating = self._find_numeric_value(
+                    source_node,
+                    [
+                        "rating",
+                        "averageRating",
+                        "avgRating",
+                        "sofascoreRating",
+                        "averageSofascoreRating",
+                        "ratingAverage",
+                    ],
+                )
+                rating = float(nested_rating or 0.0)
 
             minutes = _safe_int(stats.get("minutesPlayed"))
             if minutes <= 0:
                 minutes = _safe_int(source_node.get("minutesPlayed"))
             if minutes <= 0:
                 minutes = _safe_int(source_node.get("minutes"))
+            if minutes <= 0:
+                nested_minutes = self._find_numeric_value(
+                    source_node,
+                    ["minutesPlayed", "minutes", "playedMinutes", "minutesTotal"],
+                )
+                minutes = int(round(float(nested_minutes or 0.0)))
 
             row = {
                 "player_id": player_id if player_id > 0 else None,
