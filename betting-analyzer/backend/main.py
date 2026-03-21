@@ -33,6 +33,7 @@ from proxy_pool import ProxyPool, mask_proxy
 from scheduler import BettingScheduler
 from services.analysis_engine import run_analysis as run_divine_analysis
 from services.odds_scraper import get_service as get_odds_scraper_service
+from services.result_processor import build_performance_summary, list_prediction_results, process_pending_predictions
 from services.sofascore_collector import get_service as get_sofascore_collector_service
 from sofascore import get_service as get_sofascore_service, stable_uuid
 from transfermarkt import get_service as get_transfermarkt_service
@@ -2537,6 +2538,81 @@ async def get_history(
             "correct": correct,
         },
     }
+
+
+@app.get("/stats/performance")
+async def get_performance_stats(
+    lookback_days: int = Query(default=90, ge=1, le=365),
+    limit: int = Query(default=5000, ge=100, le=10000),
+) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    summary = await build_performance_summary(
+        supabase=client,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    return summary
+
+
+@app.get("/stats/predictions")
+async def get_prediction_stats(
+    status: str = Query(default="all"),
+    market: str = Query(default="all"),
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=100, ge=1, le=2000),
+) -> Dict[str, Any]:
+    normalized_status = str(status or "all").strip().lower()
+    if normalized_status not in {"all", "pending", "evaluated"}:
+        raise HTTPException(status_code=422, detail="status sadece all|pending|evaluated olabilir.")
+
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    items = await list_prediction_results(
+        supabase=client,
+        status=normalized_status,
+        market=market,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.post("/stats/recalculate")
+async def recalculate_prediction_stats(
+    batch_size: int = Query(default=500, ge=10, le=2000),
+    lookback_days: int = Query(default=30, ge=1, le=365),
+) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    reconcile = await process_pending_predictions(
+        supabase=client,
+        batch_size=batch_size,
+        lookback_days=lookback_days,
+        timezone_name=getattr(scheduler.timezone, "key", "Europe/Istanbul"),
+    )
+    summary = await build_performance_summary(
+        supabase=client,
+        lookback_days=max(lookback_days, 30),
+        limit=5000,
+    )
+    return {"status": "done", "reconcile": reconcile, "performance": summary}
+
+
+@app.post("/admin/reconcile-results")
+async def reconcile_results_now(
+    batch_size: int = Query(default=500, ge=10, le=2000),
+    lookback_days: int = Query(default=30, ge=1, le=365),
+) -> Dict[str, Any]:
+    return await recalculate_prediction_stats(batch_size=batch_size, lookback_days=lookback_days)
 
 
 @app.post("/tasks/fetch-today")

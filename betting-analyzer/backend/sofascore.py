@@ -658,6 +658,43 @@ class SofaScoreService:
         logger.info("%s icin %s mac cekildi", date, len(saved_events))
         return saved_events
 
+    async def get_event_detail(self, event_id: int, *, ttl_seconds: int = 180) -> Optional[Dict[str, Any]]:
+        payload = await self._request(f"/event/{event_id}", ttl_seconds=max(30, int(ttl_seconds)))
+        if payload is None:
+            return None
+        event = payload.get("event", {}) if isinstance(payload, dict) else {}
+        if not isinstance(event, dict) or not event:
+            return None
+        return event
+
+    async def get_event_result(self, event_id: int) -> Optional[Dict[str, Any]]:
+        event = await self.get_event_detail(event_id, ttl_seconds=120)
+        if not isinstance(event, dict):
+            return None
+
+        status_raw = str(event.get("status", {}).get("type", "")).strip().lower() if isinstance(event.get("status"), dict) else ""
+        status = map_sofascore_status(status_raw)
+        home_goals, away_goals = self._event_goals(event)
+        home_period1 = _safe_int(event.get("homeScore", {}).get("period1") if isinstance(event.get("homeScore"), dict) else 0)
+        away_period1 = _safe_int(event.get("awayScore", {}).get("period1") if isinstance(event.get("awayScore"), dict) else 0)
+
+        return {
+            "sofascore_id": int(event_id),
+            "status_raw": status_raw,
+            "status": status,
+            "finished": status == "finished",
+            "home_score": home_goals,
+            "away_score": away_goals,
+            "ht_home": home_period1,
+            "ht_away": away_period1,
+            "total_goals": home_goals + away_goals,
+            "result": "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D",
+            "ht_result": "H" if home_period1 > away_period1 else "A" if home_period1 < away_period1 else "D",
+            "btts": home_goals > 0 and away_goals > 0,
+            "match_timestamp": _safe_int(event.get("startTimestamp")),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _extract_stat_values(self, payload: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
         extracted: Dict[str, Dict[str, float]] = {}
 
@@ -1747,6 +1784,14 @@ def get_service() -> SofaScoreService:
 
 async def get_scheduled_events(date: str) -> Optional[List[Dict[str, Any]]]:
     return await _default_service.get_scheduled_events(date)
+
+
+async def get_event_detail(event_id: int, *, ttl_seconds: int = 180) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_event_detail(event_id, ttl_seconds=ttl_seconds)
+
+
+async def get_event_result(event_id: int) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_event_result(event_id)
 
 
 async def get_event_statistics(event_id: int) -> Optional[Dict[str, Any]]:

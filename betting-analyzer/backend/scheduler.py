@@ -13,6 +13,8 @@ from config import DEFAULT_SEASON, TRACKED_LEAGUE_IDS
 from odds_tracker import OddsTrackerService
 from pi_rating import update_team_pi_ratings
 from services.odds_scraper import OddsScraperService, get_service as get_odds_scraper_service
+from services.prediction_evaluator import evaluate_prediction
+from services.result_processor import build_performance_summary, process_pending_predictions
 from sofascore import SofaScoreService, get_service as get_sofascore_service
 from transfermarkt import TransfermarktService, get_service as get_transfermarkt_service
 
@@ -116,29 +118,45 @@ class BettingScheduler:
 
     @staticmethod
     def _is_prediction_correct(predicted: str, score_data: Dict[str, int]) -> bool:
-        ft_home = _safe_int(score_data.get("ft_home"))
-        ft_away = _safe_int(score_data.get("ft_away"))
-        ht_home = _safe_int(score_data.get("ht_home"))
-        ht_away = _safe_int(score_data.get("ht_away"))
-        predicted = (predicted or "").upper()
+        result_payload = {
+            "home_score": _safe_int(score_data.get("ft_home")),
+            "away_score": _safe_int(score_data.get("ft_away")),
+            "ht_home": _safe_int(score_data.get("ht_home")),
+            "ht_away": _safe_int(score_data.get("ht_away")),
+        }
+        verdict = evaluate_prediction(str(predicted or ""), result_payload)
+        return bool(verdict) if verdict is not None else False
 
-        if predicted in {"MS1", "SHARP_HOME"}:
-            return ft_home > ft_away
-        if predicted == "MSX":
-            return ft_home == ft_away
-        if predicted == "MS2":
-            return ft_away > ft_home
-        if predicted == "IY1":
-            return ht_home > ht_away
-        if predicted == "IYX":
-            return ht_home == ht_away
-        if predicted == "IY2":
-            return ht_away > ht_home
-        if predicted == "KG_VAR":
-            return ft_home > 0 and ft_away > 0
-        if predicted == "KG_YOK":
-            return not (ft_home > 0 and ft_away > 0)
-        return False
+    async def refresh_prediction_results(self) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"evaluated_predictions": 0, "correct_predictions": 0, "finished_matches": 0}
+        result = await process_pending_predictions(
+            supabase=self.supabase,
+            batch_size=500,
+            lookback_days=30,
+            timezone_name=getattr(self.timezone, "key", "Europe/Istanbul"),
+        )
+        logger.info(
+            "Prediction reconcile tamamlandi. evaluated=%s correct=%s finished_matches=%s unresolved=%s",
+            result.get("evaluated_predictions", 0),
+            result.get("correct_predictions", 0),
+            result.get("finished_matches", 0),
+            result.get("unresolved_predictions", 0),
+        )
+        return result
+
+    async def log_daily_performance_snapshot(self) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"total_predictions": 0, "evaluated_predictions": 0, "hit_rate": 0.0, "roi": 0.0}
+        summary = await build_performance_summary(supabase=self.supabase, lookback_days=90, limit=5000)
+        logger.info(
+            "Performans snapshot. total=%s evaluated=%s hit_rate=%s%% roi=%s%%",
+            summary.get("total_predictions", 0),
+            summary.get("evaluated_predictions", 0),
+            summary.get("hit_rate", 0.0),
+            summary.get("roi", 0.0),
+        )
+        return summary
 
     def _update_results_for_match(self, match_id: str, score_data: Dict[str, int]) -> Dict[str, int]:
         if self.supabase is None:
@@ -652,6 +670,21 @@ class BettingScheduler:
             "interval",
             minutes=30,
             id="sofascore-odds-30m",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.refresh_prediction_results,
+            "interval",
+            minutes=5,
+            id="results-reconcile-5m",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.log_daily_performance_snapshot,
+            "cron",
+            hour=2,
+            minute=0,
+            id="daily-performance-stats",
             replace_existing=True,
         )
 
