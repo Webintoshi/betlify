@@ -7,10 +7,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from supabase import Client
 from zoneinfo import ZoneInfo
 
+from ev_calculator import SUPPORTED_MARKETS
 from services.prediction_evaluator import evaluate_prediction
 from services.result_fetcher import ResultFetcher, get_service as get_result_fetcher_service
 
 logger = logging.getLogger(__name__)
+SUPPORTED_MARKET_SET = {str(item).strip().upper() for item in SUPPORTED_MARKETS}
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
@@ -114,7 +116,13 @@ def _fetch_predictions(client: Client, *, limit: int, lookback_days: int) -> Lis
     if lookback_days > 0:
         lower_bound = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
         query = query.gte("created_at", lower_bound)
-    return query.execute().data or []
+    rows = query.execute().data or []
+    filtered: List[Dict[str, Any]] = []
+    for row in rows:
+        market_name = str(row.get("market_type") or row.get("predicted_outcome") or "").strip().upper()
+        if market_name in SUPPORTED_MARKET_SET:
+            filtered.append(row)
+    return filtered
 
 
 def _fetch_resolved_prediction_ids(client: Client, prediction_ids: List[str]) -> set[str]:
@@ -481,6 +489,8 @@ async def list_prediction_results(
         if not prediction_id:
             continue
         market_name = str(row.get("market_type") or row.get("predicted_outcome") or "").strip().upper()
+        if market_name not in SUPPORTED_MARKET_SET:
+            continue
         if market != "all" and market_name != str(market or "").strip().upper():
             continue
 
