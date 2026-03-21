@@ -1098,8 +1098,11 @@ class SofaScoreService:
             possession = self._find_numeric_value(row, ["ballPossession", "possession"])
             goals_for = self._find_numeric_value(row, ["goalsScored", "goalsFor", "scoresFor"])
             goals_against = self._find_numeric_value(row, ["goalsConceded", "goalsAgainst", "scoresAgainst"])
+            assists = self._find_numeric_value(row, ["assists"])
+            clean_sheets = self._find_numeric_value(row, ["cleanSheets", "cleanSheet"])
             matches_played = self._find_numeric_value(row, ["matches", "matchesPlayed", "gamesPlayed", "played"])
             avg_rating = self._find_numeric_value(row, ["averageRating", "sofascoreRating", "rating"])
+            per_match_divisor = max(1.0, float(matches_played or 0.0))
             normalized.append(
                 {
                     "tournament_id": tournament_id,
@@ -1112,6 +1115,10 @@ class SofaScoreService:
                     "goals_for": round(float(goals_for or 0.0), 3),
                     "goals_against": round(float(goals_against or 0.0), 3),
                     "matches_played": int(round(float(matches_played or 0.0))),
+                    "goals_per_match": round(float(goals_for or 0.0) / per_match_divisor, 3),
+                    "goals_conceded_per_match": round(float(goals_against or 0.0) / per_match_divisor, 3),
+                    "assists": int(round(float(assists or 0.0))),
+                    "clean_sheets": int(round(float(clean_sheets or 0.0))),
                     "avg_rating": round(float(avg_rating or 0.0), 3),
                 }
             )
@@ -1148,6 +1155,8 @@ class SofaScoreService:
         )
         goals_for = float(self._find_numeric_value(stats, ["goalsScored", "goalsFor", "scoresFor"]) or 0.0)
         goals_against = float(self._find_numeric_value(stats, ["goalsConceded", "goalsAgainst", "scoresAgainst"]) or 0.0)
+        assists = float(self._find_numeric_value(stats, ["assists"]) or 0.0)
+        clean_sheets = float(self._find_numeric_value(stats, ["cleanSheets", "cleanSheet"]) or 0.0)
         expected_goals_raw = float(
             self._find_numeric_value(
                 stats,
@@ -1200,6 +1209,10 @@ class SofaScoreService:
             "matches_played": matches_played,
             "goals_for": round(goals_for, 3),
             "goals_against": round(goals_against, 3),
+            "goals_per_match": round(goals_for / per_match_divisor, 3),
+            "goals_conceded_per_match": round(goals_against / per_match_divisor, 3),
+            "clean_sheets": int(round(clean_sheets)),
+            "assists": int(round(assists)),
             "expected_goals": round(expected_goals, 3),
             "shots_on_target": round(shots_on_target_total / per_match_divisor, 3),
             "big_chances": round(big_chances_total / per_match_divisor, 3),

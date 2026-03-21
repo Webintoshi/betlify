@@ -1685,10 +1685,15 @@ async def _run_match_analysis(
                             played = int(home_row.get("played", 0) or 0)
                             goals_for = float(home_row.get("goals_for", 0) or 0)
                             goals_against = float(home_row.get("goals_against", 0) or 0)
+                            per_match_divisor = float(played) if played > 0 else 1.0
                             sofascore_season_stats["home"] = {
                                 "matches_played": played,
                                 "goals_for": goals_for,
                                 "goals_against": goals_against,
+                                "goals_per_match": round(goals_for / per_match_divisor, 3),
+                                "goals_conceded_per_match": round(goals_against / per_match_divisor, 3),
+                                "clean_sheets": 0,
+                                "assists": 0,
                                 "expected_goals": round(goals_for / played, 3) if played > 0 else 0.0,
                                 "shots_on_target": 0.0,
                                 "big_chances": 0.0,
@@ -1700,16 +1705,36 @@ async def _run_match_analysis(
                             played = int(away_row.get("played", 0) or 0)
                             goals_for = float(away_row.get("goals_for", 0) or 0)
                             goals_against = float(away_row.get("goals_against", 0) or 0)
+                            per_match_divisor = float(played) if played > 0 else 1.0
                             sofascore_season_stats["away"] = {
                                 "matches_played": played,
                                 "goals_for": goals_for,
                                 "goals_against": goals_against,
+                                "goals_per_match": round(goals_for / per_match_divisor, 3),
+                                "goals_conceded_per_match": round(goals_against / per_match_divisor, 3),
+                                "clean_sheets": 0,
+                                "assists": 0,
                                 "expected_goals": round(goals_for / played, 3) if played > 0 else 0.0,
                                 "shots_on_target": 0.0,
                                 "big_chances": 0.0,
                                 "possession": 0.0,
                                 "avg_rating": 0.0,
                             }
+
+                    if isinstance(sofascore_standings, list):
+                        standing_by_team = {
+                            int(row.get("team_sofascore_id", 0) or 0): row
+                            for row in sofascore_standings
+                            if isinstance(row, dict)
+                        }
+                        if home_sofascore_id > 0 and isinstance(sofascore_season_stats.get("home"), dict):
+                            home_row = standing_by_team.get(home_sofascore_id, {})
+                            if home_row:
+                                sofascore_season_stats["home"]["position"] = int(home_row.get("position", 0) or 0)
+                        if away_sofascore_id > 0 and isinstance(sofascore_season_stats.get("away"), dict):
+                            away_row = standing_by_team.get(away_sofascore_id, {})
+                            if away_row:
+                                sofascore_season_stats["away"]["position"] = int(away_row.get("position", 0) or 0)
 
             sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
             if isinstance(sofa_h2h, dict):
