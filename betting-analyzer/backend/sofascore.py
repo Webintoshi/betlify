@@ -940,6 +940,60 @@ class SofaScoreService:
 
         return walk(payload)
 
+    def _extract_event_nodes(self, payload: Any) -> List[Dict[str, Any]]:
+        seen: set[str] = set()
+        rows: List[Dict[str, Any]] = []
+
+        def add_event(node: Dict[str, Any]) -> None:
+            home = node.get("homeTeam")
+            away = node.get("awayTeam")
+            if not isinstance(home, dict) or not isinstance(away, dict):
+                return
+            event_id = _safe_int(node.get("id"))
+            key = str(event_id) if event_id > 0 else f"{_safe_int(node.get('startTimestamp'))}:{home.get('name')}:{away.get('name')}"
+            if key in seen:
+                return
+            seen.add(key)
+            rows.append(node)
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                add_event(node)
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(payload)
+        return rows
+
+    def _extract_team_stat_nodes(self, payload: Any) -> List[Dict[str, Any]]:
+        seen: set[int] = set()
+        rows: List[Dict[str, Any]] = []
+
+        def push(node: Dict[str, Any]) -> None:
+            team = node.get("team") if isinstance(node.get("team"), dict) else {}
+            team_id = _safe_int(team.get("id"))
+            if team_id <= 0 or team_id in seen:
+                return
+            seen.add(team_id)
+            rows.append(node)
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                push(node)
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(payload)
+        return rows
+
     async def get_team_halftime_statistics(
         self,
         team_id: str,
@@ -1027,9 +1081,13 @@ class SofaScoreService:
         )
         if payload is None:
             return None
-        stats_list = payload.get("statistics", []) if isinstance(payload, dict) else []
-        if not isinstance(stats_list, list):
-            return None
+        stats_list = self._extract_team_stat_nodes(payload if isinstance(payload, dict) else {})
+        if not stats_list:
+            direct = payload.get("statistics", []) if isinstance(payload, dict) else []
+            if isinstance(direct, list):
+                stats_list = [row for row in direct if isinstance(row, dict)]
+        if not stats_list:
+            return []
         normalized: List[Dict[str, Any]] = []
         for row in stats_list:
             if not isinstance(row, dict):
@@ -1037,6 +1095,11 @@ class SofaScoreService:
             expected_goals = self._find_numeric_value(row, ["expectedGoals", "xg"])
             shots_on_target = self._find_numeric_value(row, ["shotsOnTarget", "sot"])
             big_chances = self._find_numeric_value(row, ["bigChances"])
+            possession = self._find_numeric_value(row, ["ballPossession", "possession"])
+            goals_for = self._find_numeric_value(row, ["goalsScored", "goalsFor", "scoresFor"])
+            goals_against = self._find_numeric_value(row, ["goalsConceded", "goalsAgainst", "scoresAgainst"])
+            matches_played = self._find_numeric_value(row, ["matches", "matchesPlayed", "gamesPlayed", "played"])
+            avg_rating = self._find_numeric_value(row, ["averageRating", "sofascoreRating", "rating"])
             normalized.append(
                 {
                     "tournament_id": tournament_id,
@@ -1045,6 +1108,11 @@ class SofaScoreService:
                     "expected_goals": round(float(expected_goals or 0.0), 3),
                     "shots_on_target": round(float(shots_on_target or 0.0), 3),
                     "big_chances": round(float(big_chances or 0.0), 3),
+                    "possession": round(float(possession or 0.0), 3),
+                    "goals_for": round(float(goals_for or 0.0), 3),
+                    "goals_against": round(float(goals_against or 0.0), 3),
+                    "matches_played": int(round(float(matches_played or 0.0))),
+                    "avg_rating": round(float(avg_rating or 0.0), 3),
                 }
             )
         return normalized
@@ -1138,34 +1206,86 @@ class SofaScoreService:
     async def get_team_top_players(self, team_id: int, limit: int = 5) -> List[Dict[str, Any]]:
         if team_id <= 0:
             return []
-        payload = await self._request(f"/team/{team_id}/players", ttl_seconds=3600)
-        if payload is None:
-            return []
-        players = payload.get("players", []) if isinstance(payload, dict) else []
-        if not isinstance(players, list):
+        endpoints = [
+            f"/team/{team_id}/top-players/overall",
+            f"/team/{team_id}/top-players",
+            f"/team/{team_id}/players",
+        ]
+
+        payloads: List[Dict[str, Any]] = []
+        for endpoint in endpoints:
+            payload = await self._request(endpoint, ttl_seconds=3600)
+            if isinstance(payload, dict):
+                payloads.append(payload)
+
+        if not payloads:
             return []
 
-        rows: List[Dict[str, Any]] = []
-        for item in players:
-            if not isinstance(item, dict):
-                continue
-            player = item.get("player", {}) if isinstance(item.get("player"), dict) else {}
-            statistics = item.get("statistics", {}) if isinstance(item.get("statistics"), dict) else {}
-            rating = _safe_float(statistics.get("rating"), fallback=0.0)
+        rows_by_key: Dict[str, Dict[str, Any]] = {}
+
+        def upsert_row(player_node: Dict[str, Any], source_node: Dict[str, Any]) -> None:
+            name = str(player_node.get("name") or source_node.get("name") or "").strip()
+            if not name:
+                return
+            player_id = _safe_int(player_node.get("id") or source_node.get("id"))
+            key = f"id:{player_id}" if player_id > 0 else f"name:{_normalize_name(name)}"
+            stats = source_node.get("statistics", {}) if isinstance(source_node.get("statistics"), dict) else {}
+            rating = _safe_float(stats.get("rating"), fallback=0.0)
             if rating <= 0:
-                rating = _safe_float(item.get("rating"), fallback=0.0)
-            rows.append(
-                {
-                    "player_id": _safe_int(player.get("id")),
-                    "name": str(player.get("name") or ""),
-                    "position": str(player.get("position") or ""),
-                    "rating": round(float(rating), 2),
-                    "minutes_played": _safe_int(statistics.get("minutesPlayed")),
-                }
-            )
+                rating = _safe_float(source_node.get("rating"), fallback=0.0)
+            if rating <= 0:
+                rating = _safe_float(source_node.get("averageRating"), fallback=0.0)
+            if rating <= 0:
+                rating = _safe_float(source_node.get("sofascoreRating"), fallback=0.0)
 
-        rows = [row for row in rows if row.get("name")]
-        rows.sort(key=lambda row: (float(row.get("rating", 0.0) or 0.0), int(row.get("minutes_played", 0) or 0)), reverse=True)
+            minutes = _safe_int(stats.get("minutesPlayed"))
+            if minutes <= 0:
+                minutes = _safe_int(source_node.get("minutesPlayed"))
+            if minutes <= 0:
+                minutes = _safe_int(source_node.get("minutes"))
+
+            row = {
+                "player_id": player_id if player_id > 0 else None,
+                "name": name,
+                "position": str(player_node.get("position") or source_node.get("position") or ""),
+                "rating": round(float(rating), 2),
+                "minutes_played": int(minutes),
+            }
+            existing = rows_by_key.get(key)
+            if existing is None:
+                rows_by_key[key] = row
+                return
+            if (
+                float(row.get("rating", 0.0)) > float(existing.get("rating", 0.0))
+                or int(row.get("minutes_played", 0)) > int(existing.get("minutes_played", 0))
+            ):
+                rows_by_key[key] = row
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                player = node.get("player") if isinstance(node.get("player"), dict) else None
+                if isinstance(player, dict) and (player.get("name") or node.get("name")):
+                    upsert_row(player, node)
+                elif node.get("name") and (node.get("position") is not None or node.get("rating") is not None):
+                    upsert_row(node, node)
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        for payload in payloads:
+            walk(payload)
+
+        rows = list(rows_by_key.values())
+        rows.sort(
+            key=lambda row: (
+                float(row.get("rating", 0.0) or 0.0),
+                int(row.get("minutes_played", 0) or 0),
+            ),
+            reverse=True,
+        )
         return rows[: max(1, int(limit))]
 
     @staticmethod
@@ -1615,7 +1735,7 @@ class SofaScoreService:
         match = self._resolve_internal_match(sofascore_event_id)
 
         payload = await self._request(f"/event/{sofascore_event_id}/h2h/events", ttl_seconds=1200)
-        events = payload.get("events", []) if isinstance(payload, dict) else []
+        events = self._extract_event_nodes(payload if isinstance(payload, dict) else {})
 
         home_wins = 0
         away_wins = 0
@@ -1755,7 +1875,7 @@ class SofaScoreService:
         ]
         for endpoint in endpoints:
             payload = await self._request(endpoint, ttl_seconds=1200)
-            candidate = payload.get("events", []) if isinstance(payload, dict) else []
+            candidate = self._extract_event_nodes(payload if isinstance(payload, dict) else {})
             if isinstance(candidate, list) and candidate:
                 events = candidate
                 break
