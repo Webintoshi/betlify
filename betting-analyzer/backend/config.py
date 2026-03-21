@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import os
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 TRACKED_LEAGUES = {
     # Turkiye
     203: "Turkiye Super Lig",
@@ -53,3 +63,4 @@ SOFASCORE_TOURNAMENT_IDS = {
 SOFASCORE_TOURNAMENT_ID_SET = set(SOFASCORE_TOURNAMENT_IDS.keys())
 
 DEFAULT_SEASON = int(os.getenv("DEFAULT_SEASON", "2024"))
+ENABLE_SOFASCORE_ENRICHMENT = _env_bool("ENABLE_SOFASCORE_ENRICHMENT", True)

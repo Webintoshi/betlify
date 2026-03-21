@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from api_football import ApiFootballService, get_service as get_api_service
-from config import DEFAULT_SEASON, TRACKED_LEAGUE_IDS
+from config import DEFAULT_SEASON, ENABLE_SOFASCORE_ENRICHMENT, TRACKED_LEAGUE_IDS
 from pi_rating import update_team_pi_ratings
 from services.odds_scraper import OddsScraperService, get_service as get_odds_scraper_service
 from services.prediction_evaluator import evaluate_prediction
 from services.result_processor import build_performance_summary, process_pending_predictions
+from sofascore import SofaScoreService, get_service as get_sofascore_service
 from transfermarkt import TransfermarktService, get_service as get_transfermarkt_service
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class BettingScheduler:
         self.api_service: ApiFootballService = get_api_service()
         self.supabase = self.api_service.supabase
         self.odds_scraper: OddsScraperService = get_odds_scraper_service()
+        self.sofascore: Optional[SofaScoreService] = get_sofascore_service() if ENABLE_SOFASCORE_ENRICHMENT else None
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
 
     def _today_and_tomorrow(self) -> List[str]:
@@ -264,7 +266,8 @@ class BettingScheduler:
         return {"season": DEFAULT_SEASON, "updated_teams": updated, "league_rows": league_rows}
 
     async def fetch_sofascore_daily_events(self) -> Dict[str, Any]:
-        return {"total_events": 0, "by_date": {}, "skipped": True, "reason": "betfair_only_mode"}
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"total_events": 0, "by_date": {}, "skipped": True, "reason": "sofascore_enrichment_disabled"}
         dates = self._today_and_tomorrow()
         total = 0
         by_date: Dict[str, int] = {}
@@ -277,7 +280,8 @@ class BettingScheduler:
         return {"total_events": total, "by_date": by_date}
 
     async def populate_today_team_stats_history(self) -> Dict[str, Any]:
-        return {"processed_matches": 0, "updated_teams": 0, "skipped": True, "reason": "betfair_only_mode"}
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed_matches": 0, "updated_teams": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
         if self.supabase is None:
             return {"processed_matches": 0, "updated_teams": 0}
 
@@ -346,7 +350,14 @@ class BettingScheduler:
         return {"processed_matches": processed, "updated_teams": updated_teams, "updated_ht_stats": updated_ht_stats}
 
     async def refresh_today_injuries_and_h2h(self) -> Dict[str, Any]:
-        return {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0, "skipped": True, "reason": "betfair_only_mode"}
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {
+                "processed_matches": 0,
+                "injury_rows": 0,
+                "h2h_rows": 0,
+                "skipped": True,
+                "reason": "sofascore_enrichment_disabled",
+            }
         if self.supabase is None:
             return {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0}
 
@@ -508,7 +519,8 @@ class BettingScheduler:
             logger.exception("Sofascore recalc prediction save failed. match_id=%s", match_id)
 
     async def refresh_sofascore_two_hour_prematch(self) -> Dict[str, Any]:
-        return {"processed_matches": 0, "skipped": True, "reason": "betfair_only_mode"}
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed_matches": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
         if self.supabase is None:
             return {"processed_matches": 0}
         now = datetime.now(self.timezone)
@@ -652,6 +664,29 @@ class BettingScheduler:
             id="weekly-market-values",
             replace_existing=True,
         )
+        if ENABLE_SOFASCORE_ENRICHMENT and self.sofascore is not None:
+            self.scheduler.add_job(
+                self.fetch_sofascore_daily_events,
+                "cron",
+                hour=8,
+                minute=0,
+                id="sofascore-daily-events",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_today_injuries_and_h2h,
+                "interval",
+                hours=3,
+                id="sofascore-injuries-h2h-3h",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_sofascore_two_hour_prematch,
+                "interval",
+                minutes=30,
+                id="sofascore-prematch-2h",
+                replace_existing=True,
+            )
         self.scheduler.add_job(
             self.reconcile_oddsapi_results,
             "interval",
@@ -679,4 +714,6 @@ class BettingScheduler:
             self.scheduler.shutdown(wait=False)
         await self.api_service.close()
         await self.odds_scraper.close()
+        if self.sofascore is not None:
+            await self.sofascore.close()
         await self.transfermarkt.close()

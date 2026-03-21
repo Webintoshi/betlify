@@ -25,13 +25,14 @@ from analyzer import (
     rho_fit,
 )
 from api_football import get_service as get_api_service
-from config import TRACKED_LEAGUE_IDS
+from config import ENABLE_SOFASCORE_ENRICHMENT, TRACKED_LEAGUE_IDS
 from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
 from pi_rating import calculate_pi_ratings
 from scheduler import BettingScheduler
 from services.analysis_engine import run_analysis as run_divine_analysis
 from services.odds_scraper import get_service as get_odds_scraper_service
 from services.result_processor import build_performance_summary, list_prediction_results, process_pending_predictions
+from sofascore import get_service as get_sofascore_service
 from transfermarkt import get_service as get_transfermarkt_service
 from weather import get_service as get_weather_service
 
@@ -49,6 +50,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 scheduler = BettingScheduler()
 api_football = get_api_service()
 odds_scraper = get_odds_scraper_service()
+sofascore = get_sofascore_service() if ENABLE_SOFASCORE_ENRICHMENT else None
 transfermarkt_service = get_transfermarkt_service()
 weather_service = get_weather_service()
 backfill_task: Optional[asyncio.Task[Any]] = None
@@ -152,6 +154,33 @@ async def _run_full_backfill() -> None:
 
         fixtures_result = await scheduler.fetch_specific_dates(date_window)
 
+        sofascore_payload: Dict[str, Any] = {"enabled": bool(ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None)}
+        if ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None:
+            sofascore_total = 0
+            sofascore_by_date: Dict[str, int] = {}
+            for date_str in [now.isoformat(), (now + timedelta(days=1)).isoformat()]:
+                rows = await sofascore.get_scheduled_events(date_str)
+                count = len(rows or [])
+                sofascore_total += count
+                sofascore_by_date[date_str] = count
+            sofascore_payload.update(
+                {
+                    "total_saved": sofascore_total,
+                    "by_date": sofascore_by_date,
+                    "daily_team_stats": await scheduler.populate_today_team_stats_history(),
+                    "injuries_h2h": await scheduler.refresh_today_injuries_and_h2h(),
+                }
+            )
+        else:
+            sofascore_payload.update(
+                {
+                    "total_saved": 0,
+                    "by_date": {},
+                    "daily_team_stats": {"processed_matches": 0, "updated_teams": 0, "skipped": True},
+                    "injuries_h2h": {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0, "skipped": True},
+                }
+            )
+
         odds_events_sync_result = await scheduler.sync_oddsapi_events()
         odds_refresh_result = await scheduler.refresh_oddsapi_odds()
         odds_results_result = await scheduler.reconcile_oddsapi_results()
@@ -160,6 +189,13 @@ async def _run_full_backfill() -> None:
 
         result_payload = {
             "fixtures": fixtures_result,
+            "sofascore": {
+                "enabled": sofascore_payload.get("enabled", False),
+                "total_saved": sofascore_payload.get("total_saved", 0),
+                "by_date": sofascore_payload.get("by_date", {}),
+            },
+            "daily_team_stats": sofascore_payload.get("daily_team_stats"),
+            "injuries_h2h": sofascore_payload.get("injuries_h2h"),
             "oddsapi_events_sync": odds_events_sync_result,
             "odds_refresh": odds_refresh_result,
             "odds_results_reconcile": odds_results_result,
@@ -1535,6 +1571,7 @@ async def _run_match_analysis(
     away_stats = [row for row in team_stats if row.get("team_id") == match_row["away_team_id"]]
 
     api_match_id = int(match_row.get("api_match_id", 0) or 0)
+    sofascore_match_id = int(match_row.get("sofascore_id", 0) or 0)
     home_team_id = str(match_row["home_team_id"])
     away_team_id = str(match_row["away_team_id"])
     injuries: List[Dict[str, Any]] = []
@@ -1544,6 +1581,12 @@ async def _run_match_analysis(
     h2h_matches: List[Dict[str, Any]] = []
     home_recent_form: List[Dict[str, Any]] = []
     away_recent_form: List[Dict[str, Any]] = []
+    sofascore_standings: List[Dict[str, Any]] = []
+    sofascore_season_stats: Dict[str, Dict[str, Any]] = {"home": {}, "away": {}}
+    sofascore_top_players: Dict[str, List[Dict[str, Any]]] = {"home": [], "away": []}
+    sofascore_event_meta: Dict[str, Any] = {}
+    sofascore_mapping: Optional[Dict[str, int]] = None
+    should_refresh_enrichment = bool(ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None and (refresh_live or include_details))
     if api_match_id > 0 and refresh_live:
         await api_football.get_odds(api_match_id)
         await api_football.get_predictions(api_match_id)
@@ -1554,6 +1597,135 @@ async def _run_match_analysis(
         if home_api_id > 0 and away_api_id > 0:
             h2h_rows = await api_football.get_head_to_head(home_api_id, away_api_id) or []
             h2h_summary = {"ratio": _h2h_points_ratio(h2h_rows, home_api_id)}
+
+    if ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None:
+        if should_refresh_enrichment:
+            if sofascore_match_id > 0:
+                sofascore_mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
+                if not isinstance(sofascore_mapping, dict):
+                    sofascore_mapping = {"event_id": sofascore_match_id}
+            else:
+                mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
+                sofascore_match_id = int(mapping.get("event_id", 0) or 0) if isinstance(mapping, dict) else 0
+                sofascore_mapping = mapping if isinstance(mapping, dict) else None
+        else:
+            sofascore_mapping = {
+                "event_id": sofascore_match_id,
+                "home_sofascore_id": int(team_rows.get(home_team_id, {}).get("sofascore_id", 0) or 0),
+                "away_sofascore_id": int(team_rows.get(away_team_id, {}).get("sofascore_id", 0) or 0),
+            }
+
+        home_sofascore_id = int((sofascore_mapping or {}).get("home_sofascore_id", 0) or 0)
+        away_sofascore_id = int((sofascore_mapping or {}).get("away_sofascore_id", 0) or 0)
+
+        if sofascore_match_id > 0 and should_refresh_enrichment:
+            event_detail = await sofascore.get_event_detail(sofascore_match_id, ttl_seconds=600)
+            if isinstance(event_detail, dict):
+                tournament = event_detail.get("tournament", {}) if isinstance(event_detail.get("tournament"), dict) else {}
+                unique_tournament = (
+                    tournament.get("uniqueTournament")
+                    if isinstance(tournament.get("uniqueTournament"), dict)
+                    else {}
+                )
+                season = event_detail.get("season", {}) if isinstance(event_detail.get("season"), dict) else {}
+                tournament_id = int(unique_tournament.get("id", 0) or tournament.get("id", 0) or 0)
+                season_id = int(season.get("id", 0) or season.get("year", 0) or 0)
+                sofascore_event_meta = {
+                    "event_id": sofascore_match_id,
+                    "tournament_id": tournament_id,
+                    "tournament_name": str(unique_tournament.get("name") or tournament.get("name") or ""),
+                    "season_id": season_id,
+                    "season_name": str(season.get("name") or season.get("year") or ""),
+                }
+                if tournament_id > 0 and season_id > 0:
+                    standings_rows = await sofascore.get_tournament_standings(tournament_id, season_id)
+                    if isinstance(standings_rows, list):
+                        sofascore_standings = standings_rows
+                    season_rows = await sofascore.get_tournament_season_overall_statistics(tournament_id, season_id)
+                    if isinstance(season_rows, list):
+                        by_team = {
+                            int(row.get("team_sofascore_id", 0) or 0): row
+                            for row in season_rows
+                            if isinstance(row, dict)
+                        }
+                        if home_sofascore_id > 0:
+                            sofascore_season_stats["home"] = by_team.get(home_sofascore_id, {})
+                        if away_sofascore_id > 0:
+                            sofascore_season_stats["away"] = by_team.get(away_sofascore_id, {})
+
+            sofa_h2h = await sofascore.get_h2h(sofascore_match_id)
+            if isinstance(sofa_h2h, dict):
+                if sofa_h2h.get("ratio") is not None:
+                    h2h_summary = sofa_h2h
+                if isinstance(sofa_h2h.get("matches"), list):
+                    h2h_matches = sofa_h2h.get("matches") or []
+            sofa_injuries = await sofascore.get_match_injuries(sofascore_match_id)
+            if isinstance(sofa_injuries, dict):
+                injuries_by_side = {
+                    "home": sofa_injuries.get("home", []) or [],
+                    "away": sofa_injuries.get("away", []) or [],
+                }
+
+        if home_sofascore_id > 0 and should_refresh_enrichment:
+            home_recent_form = await sofascore.get_team_recent_matches(home_sofascore_id, limit=6)
+            await sofascore.get_team_halftime_statistics(
+                team_id=home_team_id,
+                sofascore_team_id=home_sofascore_id,
+                season=str(match_row.get("season") or ""),
+            )
+            sofascore_top_players["home"] = await sofascore.get_team_top_players(home_sofascore_id, limit=5)
+        if away_sofascore_id > 0 and should_refresh_enrichment:
+            away_recent_form = await sofascore.get_team_recent_matches(away_sofascore_id, limit=6)
+            await sofascore.get_team_halftime_statistics(
+                team_id=away_team_id,
+                sofascore_team_id=away_sofascore_id,
+                season=str(match_row.get("season") or ""),
+            )
+            sofascore_top_players["away"] = await sofascore.get_team_top_players(away_sofascore_id, limit=5)
+
+        if home_sofascore_id > 0 and away_sofascore_id > 0 and should_refresh_enrichment:
+            pair_h2h = await sofascore.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=5)
+            if pair_h2h:
+                h2h_matches = pair_h2h
+                h2h_rows = [
+                    {
+                        "match_date": row.get("match_date"),
+                        "home_goals": int(row.get("home_goals", 0) or 0),
+                        "away_goals": int(row.get("away_goals", 0) or 0),
+                        "league": row.get("league"),
+                        "is_cup": bool(row.get("is_cup", False)),
+                    }
+                    for row in pair_h2h
+                    if isinstance(row, dict)
+                ]
+                if not isinstance(h2h_summary, dict):
+                    home_wins = len(
+                        [r for r in h2h_rows if int(r.get("home_goals", 0) or 0) > int(r.get("away_goals", 0) or 0)]
+                    )
+                    away_wins = len(
+                        [r for r in h2h_rows if int(r.get("home_goals", 0) or 0) < int(r.get("away_goals", 0) or 0)]
+                    )
+                    draws = len(
+                        [r for r in h2h_rows if int(r.get("home_goals", 0) or 0) == int(r.get("away_goals", 0) or 0)]
+                    )
+                    total = home_wins + away_wins + draws
+                    h2h_summary = {
+                        "home_wins": home_wins,
+                        "away_wins": away_wins,
+                        "draws": draws,
+                        "ratio": round(home_wins / total, 4) if total > 0 else 0.5,
+                    }
+
+        should_backfill_team_stats = (
+            not home_stats
+            or not away_stats
+            or (_avg_stat(home_stats, "xg_for", limit=10) <= 0 and _avg_stat(away_stats, "xg_for", limit=10) <= 0)
+        )
+        if should_refresh_enrichment and should_backfill_team_stats and home_sofascore_id > 0 and away_sofascore_id > 0:
+            await sofascore.populate_team_stats_for_match(resolved_match_id)
+            team_stats = _fetch_team_stats(client, [str(match_row["home_team_id"]), str(match_row["away_team_id"])])
+            home_stats = [row for row in team_stats if row.get("team_id") == match_row["home_team_id"]]
+            away_stats = [row for row in team_stats if row.get("team_id") == match_row["away_team_id"]]
 
     if not h2h_rows:
         h2h_rows = _fetch_h2h_rows(client, home_team_id, away_team_id, limit=10)
@@ -1825,6 +1997,13 @@ async def _run_match_analysis(
         }
         payload["context"] = context
         payload["market_odds"] = odd_map
+        payload["sofascore"] = {
+            "enabled": bool(ENABLE_SOFASCORE_ENRICHMENT),
+            "event": sofascore_event_meta,
+            "standings": sofascore_standings,
+            "season_team_stats": sofascore_season_stats,
+            "top_players": sofascore_top_players,
+        }
     return payload
 
 
@@ -1847,10 +2026,12 @@ async def healthcheck() -> Dict[str, Any]:
         "odds_api_remaining": odds_scraper.odds_api.requests_remaining,
         "the_odds_remaining": odds_scraper.odds_api.requests_remaining,
         "odds_provider": "betfair_exchange",
+        "sofascore_enrichment_enabled": bool(ENABLE_SOFASCORE_ENRICHMENT),
         "api_keys": {
             "api_football": bool(os.getenv("API_FOOTBALL_KEY")),
             "odds_api_io": bool(os.getenv("ODDS_API_IO_KEY") or os.getenv("THE_ODDS_API_KEY")),
             "the_odds": bool(os.getenv("ODDS_API_IO_KEY") or os.getenv("THE_ODDS_API_KEY")),
+            "sofascore_cookie": bool(os.getenv("SOFASCORE_COOKIE")),
             "openweather": bool(os.getenv("OPENWEATHER_API_KEY")) and "BURAYA_" not in str(os.getenv("OPENWEATHER_API_KEY")),
             "supabase_service": bool(os.getenv("SUPABASE_SERVICE_KEY")),
         },
@@ -1952,11 +2133,47 @@ async def test_analyze(
 
 @app.get("/test/populate-stats/{match_id}")
 async def test_populate_stats(match_id: str) -> Dict[str, Any]:
-    _ = match_id
-    raise HTTPException(
-        status_code=410,
-        detail="Bu test endpoint'i kapatildi. Betfair-only modunda Sofascore istatistik backfill kullanilmiyor.",
-    )
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    resolved_match_id = _resolve_match_id(client, match_id)
+    if not resolved_match_id:
+        raise HTTPException(status_code=404, detail="Match not found.")
+    match_row = _fetch_match_base(client, resolved_match_id)
+
+    home_team_id = str(match_row.get("home_team_id") or "")
+    away_team_id = str(match_row.get("away_team_id") or "")
+    before = {
+        "home_xg_rolling_10": _team_xg_rolling_10(client, home_team_id),
+        "away_xg_rolling_10": _team_xg_rolling_10(client, away_team_id),
+    }
+
+    populate_result = await sofascore.populate_team_stats_for_match(resolved_match_id)
+    if not populate_result:
+        return {
+            "match_id": resolved_match_id,
+            "before": before,
+            "after": before,
+            "updated": False,
+            "detail": "Sofascore team mapping bulunamadi veya veri cekilemedi.",
+        }
+
+    after = {
+        "home_xg_rolling_10": _team_xg_rolling_10(client, home_team_id),
+        "away_xg_rolling_10": _team_xg_rolling_10(client, away_team_id),
+    }
+    return {
+        "match_id": resolved_match_id,
+        "before": before,
+        "after": after,
+        "updated": True,
+        "populate_result": populate_result,
+    }
 
 
 @app.get("/test/api-football/odds/{fixture_id}")
@@ -2027,19 +2244,48 @@ async def test_odds_api_odds(odds_api_event_id: int) -> Dict[str, Any]:
 
 @app.get("/test/sofascore-debug")
 async def test_sofascore_debug() -> Dict[str, Any]:
-    raise HTTPException(
-        status_code=410,
-        detail="Sofascore debug endpoint'i kapatildi. Betfair-only mod aktif.",
-    )
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    event_id = 14023997
+    raw = await sofascore.get_event_detail(event_id, ttl_seconds=60)
+    odds = await sofascore.get_event_odds(event_id)
+    return {
+        "event_id": event_id,
+        "cookie_set": bool(os.getenv("SOFASCORE_COOKIE")),
+        "proxy_enabled": bool(sofascore.proxy_pool.enabled),
+        "proxy_pool_size": int(sofascore.proxy_pool.size),
+        "event_ok": bool(raw),
+        "odds_ok": bool(odds),
+        "odds_market_count": len((odds or {}).keys()) if isinstance(odds, dict) else 0,
+        "sample_event": raw,
+    }
 
 
 @app.get("/test/sofascore/{date}")
 async def test_sofascore(date: str) -> Dict[str, Any]:
-    _ = date
-    raise HTTPException(
-        status_code=410,
-        detail="Sofascore test endpoint'i kapatildi. Betfair-only mod aktif.",
-    )
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+
+    events = await sofascore.get_scheduled_events(date)
+    if events is None:
+        return {"date": date, "count": 0, "leagues": {}, "fetch_failed": True}
+    items = events
+    leagues: Dict[str, int] = {}
+    for event in items:
+        tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
+        unique_tournament = (
+            tournament.get("uniqueTournament")
+            if isinstance(tournament.get("uniqueTournament"), dict)
+            else {}
+        )
+        league_name = str(unique_tournament.get("name") or tournament.get("name") or "Unknown")
+        leagues[league_name] = leagues.get(league_name, 0) + 1
+    return {
+        "date": date,
+        "count": len(items),
+        "leagues": leagues,
+        "fetch_failed": False,
+    }
 
 
 @app.post("/analyze/{match_id}")
@@ -2380,6 +2626,11 @@ async def trigger_fetch_today() -> Dict[str, Any]:
 @app.post("/tasks/update-stats")
 async def trigger_update_stats() -> Dict[str, Any]:
     weekly = await scheduler.update_weekly_team_stats()
+    daily_stats: Dict[str, Any] = {"processed_matches": 0, "updated_teams": 0, "skipped": True}
+    injuries_h2h: Dict[str, Any] = {"processed_matches": 0, "injury_rows": 0, "h2h_rows": 0, "skipped": True}
+    if ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None:
+        daily_stats = await scheduler.populate_today_team_stats_history()
+        injuries_h2h = await scheduler.refresh_today_injuries_and_h2h()
     events_sync = await scheduler.sync_oddsapi_events()
     odds_refresh = await scheduler.refresh_oddsapi_odds()
     reconcile = await scheduler.reconcile_oddsapi_results()
@@ -2387,6 +2638,8 @@ async def trigger_update_stats() -> Dict[str, Any]:
     return {
         "status": "ok",
         "weekly": weekly,
+        "daily_team_stats": daily_stats,
+        "injuries_h2h": injuries_h2h,
         "oddsapi_events_sync": events_sync,
         "odds_refresh": odds_refresh,
         "odds_results_reconcile": reconcile,

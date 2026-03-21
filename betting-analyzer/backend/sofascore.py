@@ -1049,6 +1049,55 @@ class SofaScoreService:
             )
         return normalized
 
+    async def get_tournament_standings(
+        self,
+        tournament_id: int,
+        season_id: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        if tournament_id <= 0 or season_id <= 0:
+            return None
+        payload = await self._request(
+            f"/unique-tournament/{tournament_id}/season/{season_id}/standings/total",
+            ttl_seconds=1800,
+        )
+        if payload is None:
+            return None
+
+        standings_nodes = payload.get("standings", []) if isinstance(payload, dict) else []
+        if not isinstance(standings_nodes, list) or not standings_nodes:
+            return []
+        rows = standings_nodes[0].get("rows", []) if isinstance(standings_nodes[0], dict) else []
+        if not isinstance(rows, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            team_node = row.get("team", {}) if isinstance(row.get("team"), dict) else {}
+            team_id = _safe_int(team_node.get("id"))
+            if team_id <= 0:
+                continue
+            scores_for = _safe_int(row.get("scoresFor"))
+            scores_against = _safe_int(row.get("scoresAgainst"))
+            normalized.append(
+                {
+                    "team_sofascore_id": team_id,
+                    "team_name": str(team_node.get("name") or ""),
+                    "position": _safe_int(row.get("position")),
+                    "played": _safe_int(row.get("matches")),
+                    "wins": _safe_int(row.get("wins")),
+                    "draws": _safe_int(row.get("draws")),
+                    "losses": _safe_int(row.get("losses")),
+                    "points": _safe_int(row.get("points")),
+                    "goals_for": scores_for,
+                    "goals_against": scores_against,
+                    "goal_diff": scores_for - scores_against,
+                    "form": row.get("form"),
+                }
+            )
+        return normalized
+
     async def get_event_odds_history(self, event_id: int) -> Optional[List[Dict[str, Any]]]:
         payload = await self._request(f"/event/{event_id}/odds/1/all", ttl_seconds=300)
         if payload is None:
@@ -1085,6 +1134,39 @@ class SofaScoreService:
                     }
                 )
         return rows
+
+    async def get_team_top_players(self, team_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+        if team_id <= 0:
+            return []
+        payload = await self._request(f"/team/{team_id}/players", ttl_seconds=3600)
+        if payload is None:
+            return []
+        players = payload.get("players", []) if isinstance(payload, dict) else []
+        if not isinstance(players, list):
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for item in players:
+            if not isinstance(item, dict):
+                continue
+            player = item.get("player", {}) if isinstance(item.get("player"), dict) else {}
+            statistics = item.get("statistics", {}) if isinstance(item.get("statistics"), dict) else {}
+            rating = _safe_float(statistics.get("rating"), fallback=0.0)
+            if rating <= 0:
+                rating = _safe_float(item.get("rating"), fallback=0.0)
+            rows.append(
+                {
+                    "player_id": _safe_int(player.get("id")),
+                    "name": str(player.get("name") or ""),
+                    "position": str(player.get("position") or ""),
+                    "rating": round(float(rating), 2),
+                    "minutes_played": _safe_int(statistics.get("minutesPlayed")),
+                }
+            )
+
+        rows = [row for row in rows if row.get("name")]
+        rows.sort(key=lambda row: (float(row.get("rating", 0.0) or 0.0), int(row.get("minutes_played", 0) or 0)), reverse=True)
+        return rows[: max(1, int(limit))]
 
     @staticmethod
     def _name_matches(left: str, right: str) -> bool:
