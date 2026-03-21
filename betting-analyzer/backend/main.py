@@ -1585,6 +1585,8 @@ async def _run_match_analysis(
     sofascore_season_stats: Dict[str, Dict[str, Any]] = {"home": {}, "away": {}}
     sofascore_top_players: Dict[str, List[Dict[str, Any]]] = {"home": [], "away": []}
     sofascore_event_meta: Dict[str, Any] = {}
+    sofascore_tournament_id = 0
+    sofascore_season_id = 0
     sofascore_mapping: Optional[Dict[str, int]] = None
     should_refresh_enrichment = bool(ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None and (refresh_live or include_details))
     if api_match_id > 0 and refresh_live:
@@ -1630,6 +1632,8 @@ async def _run_match_analysis(
                 season = event_detail.get("season", {}) if isinstance(event_detail.get("season"), dict) else {}
                 tournament_id = int(unique_tournament.get("id", 0) or tournament.get("id", 0) or 0)
                 season_id = int(season.get("id", 0) or season.get("year", 0) or 0)
+                sofascore_tournament_id = tournament_id
+                sofascore_season_id = season_id
                 sofascore_event_meta = {
                     "event_id": sofascore_match_id,
                     "tournament_id": tournament_id,
@@ -1641,6 +1645,23 @@ async def _run_match_analysis(
                     standings_rows = await sofascore.get_tournament_standings(tournament_id, season_id)
                     if isinstance(standings_rows, list):
                         sofascore_standings = standings_rows
+                    if home_sofascore_id > 0:
+                        home_season_stats = await sofascore.get_team_season_statistics(
+                            home_sofascore_id,
+                            tournament_id,
+                            season_id,
+                        )
+                        if isinstance(home_season_stats, dict) and home_season_stats:
+                            sofascore_season_stats["home"] = home_season_stats
+                    if away_sofascore_id > 0:
+                        away_season_stats = await sofascore.get_team_season_statistics(
+                            away_sofascore_id,
+                            tournament_id,
+                            season_id,
+                        )
+                        if isinstance(away_season_stats, dict) and away_season_stats:
+                            sofascore_season_stats["away"] = away_season_stats
+
                     season_rows = await sofascore.get_tournament_season_overall_statistics(tournament_id, season_id)
                     if isinstance(season_rows, list):
                         by_team = {
@@ -1648,9 +1669,9 @@ async def _run_match_analysis(
                             for row in season_rows
                             if isinstance(row, dict)
                         }
-                        if home_sofascore_id > 0:
+                        if home_sofascore_id > 0 and not sofascore_season_stats.get("home"):
                             sofascore_season_stats["home"] = by_team.get(home_sofascore_id, {})
-                        if away_sofascore_id > 0:
+                        if away_sofascore_id > 0 and not sofascore_season_stats.get("away"):
                             sofascore_season_stats["away"] = by_team.get(away_sofascore_id, {})
 
                     if isinstance(sofascore_standings, list):
@@ -1710,7 +1731,12 @@ async def _run_match_analysis(
                 sofascore_team_id=home_sofascore_id,
                 season=str(match_row.get("season") or ""),
             )
-            sofascore_top_players["home"] = await sofascore.get_team_top_players(home_sofascore_id, limit=5)
+            sofascore_top_players["home"] = await sofascore.get_team_top_players(
+                home_sofascore_id,
+                limit=5,
+                tournament_id=sofascore_tournament_id if sofascore_tournament_id > 0 else None,
+                season_id=sofascore_season_id if sofascore_season_id > 0 else None,
+            )
         if away_sofascore_id > 0 and should_refresh_enrichment:
             away_recent_form = await sofascore.get_team_recent_matches(away_sofascore_id, limit=6)
             await sofascore.get_team_halftime_statistics(
@@ -1718,7 +1744,12 @@ async def _run_match_analysis(
                 sofascore_team_id=away_sofascore_id,
                 season=str(match_row.get("season") or ""),
             )
-            sofascore_top_players["away"] = await sofascore.get_team_top_players(away_sofascore_id, limit=5)
+            sofascore_top_players["away"] = await sofascore.get_team_top_players(
+                away_sofascore_id,
+                limit=5,
+                tournament_id=sofascore_tournament_id if sofascore_tournament_id > 0 else None,
+                season_id=sofascore_season_id if sofascore_season_id > 0 else None,
+            )
 
         if home_sofascore_id > 0 and away_sofascore_id > 0 and should_refresh_enrichment:
             pair_h2h = await sofascore.get_h2h_matches(home_sofascore_id, away_sofascore_id, limit=5)
@@ -1756,14 +1787,22 @@ async def _run_match_analysis(
         if home_sofascore_id > 0 and away_sofascore_id > 0 and should_refresh_enrichment and not h2h_matches:
             away_name_norm = _normalize_team_name_for_matching(str(team_rows.get(away_team_id, {}).get("name", "")))
             home_name_norm = _normalize_team_name_for_matching(str(team_rows.get(home_team_id, {}).get("name", "")))
-            home_history = await sofascore.get_team_recent_matches(home_sofascore_id, limit=30)
+            home_history = await sofascore.get_team_recent_matches(home_sofascore_id, limit=120)
             derived: List[Dict[str, Any]] = []
             for item in home_history:
+                item_home_id = int(item.get("home_team_id", 0) or 0)
+                item_away_id = int(item.get("away_team_id", 0) or 0)
+                id_match = (
+                    (item_home_id == home_sofascore_id and item_away_id == away_sofascore_id)
+                    or (item_home_id == away_sofascore_id and item_away_id == home_sofascore_id)
+                )
                 item_home = _normalize_team_name_for_matching(str(item.get("home_team_name", "")))
                 item_away = _normalize_team_name_for_matching(str(item.get("away_team_name", "")))
-                if not ((item_home == away_name_norm) or (item_away == away_name_norm)):
-                    continue
-                if not ((item_home == home_name_norm) or (item_away == home_name_norm)):
+                name_match = (
+                    ((item_home == away_name_norm) or (item_away == away_name_norm))
+                    and ((item_home == home_name_norm) or (item_away == home_name_norm))
+                )
+                if not (id_match or name_match):
                     continue
                 derived.append(item)
             if derived:
@@ -1776,7 +1815,8 @@ async def _run_match_analysis(
                         "home_goals": int(row.get("home_goals", 0) or 0),
                         "away_goals": int(row.get("away_goals", 0) or 0),
                         "league": row.get("league"),
-                        "is_cup": False,
+                        "is_cup": bool(row.get("is_cup", False)),
+                        "sofascore_id": int(row.get("event_id", 0) or 0) or None,
                     }
                     for row in derived[:5]
                 ]
@@ -2366,17 +2406,41 @@ async def test_sofascore(date: str) -> Dict[str, Any]:
 
 
 @app.get("/test/sofascore/top-players/{team_id}")
-async def test_sofascore_top_players(team_id: int) -> Dict[str, Any]:
+async def test_sofascore_top_players(
+    team_id: int,
+    tournament_id: Optional[int] = Query(default=None),
+    season_id: Optional[int] = Query(default=None),
+) -> Dict[str, Any]:
     if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
         raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
-    parsed = await sofascore.get_team_top_players(team_id, limit=10)
+    parsed = await sofascore.get_team_top_players(
+        team_id,
+        limit=10,
+        tournament_id=tournament_id,
+        season_id=season_id,
+    )
+    raw_season_top = None
+    raw_season_stats = None
+    if (tournament_id or 0) > 0 and (season_id or 0) > 0:
+        raw_season_top = await sofascore._request(
+            f"/team/{team_id}/unique-tournament/{int(tournament_id or 0)}/season/{int(season_id or 0)}/top-players/overall",
+            ttl_seconds=60,
+        )
+        raw_season_stats = await sofascore._request(
+            f"/team/{team_id}/unique-tournament/{int(tournament_id or 0)}/season/{int(season_id or 0)}/statistics/overall",
+            ttl_seconds=60,
+        )
     raw_overall = await sofascore._request(f"/team/{team_id}/top-players/overall", ttl_seconds=60)
     raw_top = await sofascore._request(f"/team/{team_id}/top-players", ttl_seconds=60)
     raw_players = await sofascore._request(f"/team/{team_id}/players", ttl_seconds=60)
     return {
         "team_id": team_id,
+        "tournament_id": tournament_id,
+        "season_id": season_id,
         "parsed_count": len(parsed),
         "parsed": parsed,
+        "raw_season_top": raw_season_top,
+        "raw_season_stats": raw_season_stats,
         "raw_overall": raw_overall,
         "raw_top": raw_top,
         "raw_players": raw_players,

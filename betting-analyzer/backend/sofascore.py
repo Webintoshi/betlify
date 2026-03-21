@@ -1117,6 +1117,96 @@ class SofaScoreService:
             )
         return normalized
 
+    async def get_team_season_statistics(
+        self,
+        team_id: int,
+        tournament_id: int,
+        season_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        if team_id <= 0 or tournament_id <= 0 or season_id <= 0:
+            return None
+        payload = await self._request(
+            f"/team/{team_id}/unique-tournament/{tournament_id}/season/{season_id}/statistics/overall",
+            ttl_seconds=3600,
+        )
+        if payload is None:
+            return None
+        stats = payload.get("statistics", {}) if isinstance(payload, dict) else {}
+        if not isinstance(stats, dict) or not stats:
+            return {}
+
+        matches_played = int(
+            round(
+                float(
+                    self._find_numeric_value(
+                        stats,
+                        ["matches", "matchesPlayed", "gamesPlayed", "played", "appearances"],
+                    )
+                    or 0.0
+                )
+            )
+        )
+        goals_for = float(self._find_numeric_value(stats, ["goalsScored", "goalsFor", "scoresFor"]) or 0.0)
+        goals_against = float(self._find_numeric_value(stats, ["goalsConceded", "goalsAgainst", "scoresAgainst"]) or 0.0)
+        expected_goals_raw = float(
+            self._find_numeric_value(
+                stats,
+                ["expectedGoals", "xg", "expectedGoalsFor", "xgFor"],
+            )
+            or 0.0
+        )
+        shots_on_target_total = float(
+            self._find_numeric_value(
+                stats,
+                ["shotsOnTarget", "sot", "shotsOnTargetTotal"],
+            )
+            or 0.0
+        )
+        big_chances_total = float(
+            self._find_numeric_value(
+                stats,
+                ["bigChances", "bigChancesCreated"],
+            )
+            or 0.0
+        )
+        possession = float(
+            self._find_numeric_value(
+                stats,
+                ["averageBallPossession", "ballPossession", "possession"],
+            )
+            or 0.0
+        )
+        avg_rating = float(
+            self._find_numeric_value(
+                stats,
+                ["avgRating", "averageRating", "sofascoreRating", "rating"],
+            )
+            or 0.0
+        )
+
+        per_match_divisor = float(matches_played) if matches_played > 0 else 1.0
+        expected_goals = (
+            expected_goals_raw / per_match_divisor
+            if expected_goals_raw > 0 and expected_goals_raw > 5.0 and matches_played > 0
+            else expected_goals_raw
+        )
+        if expected_goals <= 0 and matches_played > 0 and goals_for > 0:
+            expected_goals = goals_for / per_match_divisor
+
+        return {
+            "team_sofascore_id": team_id,
+            "tournament_id": tournament_id,
+            "season_id": season_id,
+            "matches_played": matches_played,
+            "goals_for": round(goals_for, 3),
+            "goals_against": round(goals_against, 3),
+            "expected_goals": round(expected_goals, 3),
+            "shots_on_target": round(shots_on_target_total / per_match_divisor, 3),
+            "big_chances": round(big_chances_total / per_match_divisor, 3),
+            "possession": round(possession, 3),
+            "avg_rating": round(avg_rating, 3),
+        }
+
     async def get_tournament_standings(
         self,
         tournament_id: int,
@@ -1203,34 +1293,58 @@ class SofaScoreService:
                 )
         return rows
 
-    async def get_team_top_players(self, team_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    async def get_team_top_players(
+        self,
+        team_id: int,
+        limit: int = 5,
+        tournament_id: Optional[int] = None,
+        season_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         if team_id <= 0:
             return []
-        endpoints = [
-            f"/team/{team_id}/top-players/overall",
-            f"/team/{team_id}/top-players",
-            f"/team/{team_id}/players",
-        ]
 
         payloads: List[Dict[str, Any]] = []
-        for endpoint in endpoints:
-            payload = await self._request(endpoint, ttl_seconds=3600)
-            if isinstance(payload, dict):
-                payloads.append(payload)
+        season_top_loaded = False
+        if (tournament_id or 0) > 0 and (season_id or 0) > 0:
+            season_endpoint = (
+                f"/team/{team_id}/unique-tournament/{int(tournament_id or 0)}/season/{int(season_id or 0)}/top-players/overall"
+            )
+            season_payload = await self._request(season_endpoint, ttl_seconds=3600)
+            if isinstance(season_payload, dict):
+                payloads.append(season_payload)
+                top_players_node = season_payload.get("topPlayers")
+                season_top_loaded = bool(
+                    (isinstance(top_players_node, dict) and top_players_node)
+                    or (isinstance(top_players_node, list) and top_players_node)
+                )
+
+        if not season_top_loaded:
+            fallback_endpoints = [
+                f"/team/{team_id}/top-players/overall",
+                f"/team/{team_id}/top-players",
+                f"/team/{team_id}/players",
+            ]
+            for endpoint in fallback_endpoints:
+                payload = await self._request(endpoint, ttl_seconds=3600)
+                if isinstance(payload, dict):
+                    payloads.append(payload)
 
         if not payloads:
             return []
 
         rows_by_key: Dict[str, Dict[str, Any]] = {}
 
-        def upsert_row(player_node: Dict[str, Any], source_node: Dict[str, Any]) -> None:
+        def upsert_row(player_node: Dict[str, Any], source_node: Dict[str, Any], metric_hint: str = "") -> None:
             name = str(player_node.get("name") or source_node.get("name") or "").strip()
             if not name:
                 return
             player_id = _safe_int(player_node.get("id") or source_node.get("id"))
             key = f"id:{player_id}" if player_id > 0 else f"name:{_normalize_name(name)}"
             stats = source_node.get("statistics", {}) if isinstance(source_node.get("statistics"), dict) else {}
+
             rating = _safe_float(stats.get("rating"), fallback=0.0)
+            if rating <= 0 and metric_hint == "rating":
+                rating = _safe_float(stats.get("value"), fallback=0.0)
             if rating <= 0:
                 rating = _safe_float(source_node.get("rating"), fallback=0.0)
             if rating <= 0:
@@ -1251,6 +1365,16 @@ class SofaScoreService:
                 )
                 rating = float(nested_rating or 0.0)
 
+            appearances = _safe_int(stats.get("appearances"))
+            if appearances <= 0:
+                appearances = _safe_int(source_node.get("appearances"))
+            if appearances <= 0:
+                nested_appearances = self._find_numeric_value(
+                    source_node,
+                    ["appearances", "matchesPlayed", "gamesPlayed"],
+                )
+                appearances = int(round(float(nested_appearances or 0.0)))
+
             minutes = _safe_int(stats.get("minutesPlayed"))
             if minutes <= 0:
                 minutes = _safe_int(source_node.get("minutesPlayed"))
@@ -1262,6 +1386,8 @@ class SofaScoreService:
                     ["minutesPlayed", "minutes", "playedMinutes", "minutesTotal"],
                 )
                 minutes = int(round(float(nested_minutes or 0.0)))
+            if minutes <= 0 and appearances > 0:
+                minutes = appearances * 90
 
             row = {
                 "player_id": player_id if player_id > 0 else None,
@@ -1269,30 +1395,59 @@ class SofaScoreService:
                 "position": str(player_node.get("position") or source_node.get("position") or ""),
                 "rating": round(float(rating), 2),
                 "minutes_played": int(minutes),
+                "appearances": int(appearances),
             }
             existing = rows_by_key.get(key)
             if existing is None:
                 rows_by_key[key] = row
                 return
-            if (
-                float(row.get("rating", 0.0)) > float(existing.get("rating", 0.0))
-                or int(row.get("minutes_played", 0)) > int(existing.get("minutes_played", 0))
-            ):
+            current_tuple = (
+                float(row.get("rating", 0.0) or 0.0),
+                int(row.get("minutes_played", 0) or 0),
+                int(row.get("appearances", 0) or 0),
+            )
+            existing_tuple = (
+                float(existing.get("rating", 0.0) or 0.0),
+                int(existing.get("minutes_played", 0) or 0),
+                int(existing.get("appearances", 0) or 0),
+            )
+            if current_tuple > existing_tuple:
                 rows_by_key[key] = row
 
-        def walk(node: Any) -> None:
+        def walk(node: Any, metric_hint: str = "") -> None:
             if isinstance(node, dict):
+                top_players = node.get("topPlayers")
+                if isinstance(top_players, dict):
+                    for metric, items in top_players.items():
+                        if isinstance(items, list):
+                            for item in items:
+                                if not isinstance(item, dict):
+                                    continue
+                                player = item.get("player") if isinstance(item.get("player"), dict) else {}
+                                if player:
+                                    upsert_row(player, item, metric_hint=str(metric))
+                        elif isinstance(items, dict):
+                            walk(items, metric_hint=str(metric))
+                elif isinstance(top_players, list):
+                    for item in top_players:
+                        if not isinstance(item, dict):
+                            continue
+                        player = item.get("player") if isinstance(item.get("player"), dict) else {}
+                        if player:
+                            upsert_row(player, item, metric_hint=metric_hint)
+
                 player = node.get("player") if isinstance(node.get("player"), dict) else None
                 if isinstance(player, dict) and (player.get("name") or node.get("name")):
-                    upsert_row(player, node)
+                    upsert_row(player, node, metric_hint=metric_hint)
                 elif node.get("name") and (node.get("position") is not None or node.get("rating") is not None):
-                    upsert_row(node, node)
+                    upsert_row(node, node, metric_hint=metric_hint)
+
                 for value in node.values():
                     if isinstance(value, (dict, list)):
-                        walk(value)
+                        walk(value, metric_hint=metric_hint)
             elif isinstance(node, list):
                 for item in node:
-                    walk(item)
+                    walk(item, metric_hint=metric_hint)
 
         for payload in payloads:
             walk(payload)
@@ -1302,10 +1457,14 @@ class SofaScoreService:
             key=lambda row: (
                 float(row.get("rating", 0.0) or 0.0),
                 int(row.get("minutes_played", 0) or 0),
+                int(row.get("appearances", 0) or 0),
             ),
             reverse=True,
         )
-        return rows[: max(1, int(limit))]
+        selected = rows[: max(1, int(limit))]
+        for row in selected:
+            row.pop("appearances", None)
+        return selected
 
     @staticmethod
     def _name_matches(left: str, right: str) -> bool:
@@ -1554,16 +1713,39 @@ class SofaScoreService:
     async def get_team_recent_matches(self, sofascore_team_id: int, limit: int = 6) -> List[Dict[str, Any]]:
         if sofascore_team_id <= 0:
             return []
-        payload = await self._request(f"/team/{sofascore_team_id}/events/last/0", ttl_seconds=1200)
-        if payload is None:
-            return []
-        events = payload.get("events", []) if isinstance(payload, dict) else []
-        if not isinstance(events, list):
-            return []
+        target = max(1, limit)
+        events: List[Dict[str, Any]] = []
+        seen_event_ids: set[int] = set()
+        offsets = [0]
+        if target > 20:
+            max_offset = min(160, (((target - 1) // 20) + 1) * 20)
+            offsets.extend(list(range(20, max_offset + 20, 20)))
+        for offset in offsets:
+            payload = await self._request(f"/team/{sofascore_team_id}/events/last/{offset}", ttl_seconds=1200)
+            if payload is None:
+                if offset > 0:
+                    break
+                continue
+            batch = payload.get("events", []) if isinstance(payload, dict) else []
+            if not isinstance(batch, list) or not batch:
+                if offset > 0:
+                    break
+                continue
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                event_id = _safe_int(item.get("id"))
+                if event_id > 0 and event_id in seen_event_ids:
+                    continue
+                if event_id > 0:
+                    seen_event_ids.add(event_id)
+                events.append(item)
+            if len(events) >= target:
+                break
 
         rows: List[Dict[str, Any]] = []
         for event in events:
-            if len(rows) >= max(1, limit):
+            if len(rows) >= target:
                 break
             if not isinstance(event, dict):
                 continue
@@ -1591,18 +1773,27 @@ class SofaScoreService:
             tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
             unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
             league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
+            tournament_id = _safe_int(unique.get("id") or tournament.get("id"))
+            is_cup = bool(event.get("isTournament", False)) or (
+                tournament_id > 0 and tournament_id not in SOFASCORE_TOURNAMENT_ID_SET
+            )
+            home_team_id = _safe_int(home_team.get("id"))
+            away_team_id = _safe_int(away_team.get("id"))
 
             rows.append(
                 {
                     "date": event_date,
                     "home_team_name": str(home_team.get("name") or "Home"),
                     "away_team_name": str(away_team.get("name") or "Away"),
+                    "home_team_id": home_team_id if home_team_id > 0 else None,
+                    "away_team_id": away_team_id if away_team_id > 0 else None,
                     "home_goals": home_goals,
                     "away_goals": away_goals,
                     "result": result,
                     "is_home": is_home,
                     "event_id": _safe_int(event.get("id")),
                     "league": league_name,
+                    "is_cup": is_cup,
                 }
             )
         return rows
@@ -1930,6 +2121,36 @@ class SofaScoreService:
         if normalized:
             return normalized[:max_rows]
 
+        recent_history = await self.get_team_recent_matches(home_sofascore_id, limit=max(max_rows * 20, 120))
+        derived: List[Dict[str, Any]] = []
+        for row in recent_history:
+            if not isinstance(row, dict):
+                continue
+            event_home_id = _safe_int(row.get("home_team_id"))
+            event_away_id = _safe_int(row.get("away_team_id"))
+            if event_home_id <= 0 or event_away_id <= 0:
+                continue
+            if not (
+                (event_home_id == home_sofascore_id and event_away_id == away_sofascore_id)
+                or (event_home_id == away_sofascore_id and event_away_id == home_sofascore_id)
+            ):
+                continue
+            derived.append(
+                {
+                    "date": str(row.get("date") or "")[:10],
+                    "match_date": row.get("date"),
+                    "home_team": row.get("home_team_name"),
+                    "away_team": row.get("away_team_name"),
+                    "home_goals": int(row.get("home_goals", 0) or 0),
+                    "away_goals": int(row.get("away_goals", 0) or 0),
+                    "league": row.get("league"),
+                    "sofascore_id": _safe_int(row.get("event_id")) or None,
+                    "is_cup": bool(row.get("is_cup", False)),
+                }
+            )
+        if derived:
+            return derived[:max_rows]
+
         if self.supabase is None or not self._has_column("teams", "sofascore_id"):
             return []
         try:
@@ -2052,6 +2273,14 @@ async def get_tournament_season_overall_statistics(
     season_id: int,
 ) -> Optional[List[Dict[str, Any]]]:
     return await _default_service.get_tournament_season_overall_statistics(tournament_id, season_id)
+
+
+async def get_team_season_statistics(
+    team_id: int,
+    tournament_id: int,
+    season_id: int,
+) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_team_season_statistics(team_id, tournament_id, season_id)
 
 
 async def get_event_odds_history(event_id: int) -> Optional[List[Dict[str, Any]]]:
