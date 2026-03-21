@@ -167,7 +167,9 @@ async def _run_full_backfill() -> None:
 
         daily_stats_result = await scheduler.populate_today_team_stats_history()
         injuries_h2h_result = await scheduler.refresh_today_injuries_and_h2h()
-        odds_refresh_result = await scheduler.refresh_sofascore_odds()
+        odds_events_sync_result = await scheduler.sync_oddsapi_events()
+        odds_refresh_result = await scheduler.refresh_oddsapi_odds()
+        odds_results_result = await scheduler.reconcile_oddsapi_results()
         weekly_stats_result = await scheduler.update_weekly_team_stats()
         pi_rating_result = await scheduler.refresh_pi_ratings()
 
@@ -176,7 +178,9 @@ async def _run_full_backfill() -> None:
             "sofascore": {"total_saved": sofascore_total, "by_date": sofascore_by_date},
             "daily_team_stats": daily_stats_result,
             "injuries_h2h": injuries_h2h_result,
+            "oddsapi_events_sync": odds_events_sync_result,
             "odds_refresh": odds_refresh_result,
+            "odds_results_reconcile": odds_results_result,
             "weekly_team_stats": weekly_stats_result,
             "pi_rating": pi_rating_result,
         }
@@ -308,6 +312,20 @@ def _resolve_match_id(client: Client, match_id_or_api_id: str) -> Optional[str]:
 
     try:
         if match_id_or_api_id.isdigit():
+            by_odds_api_event = (
+                client.table("matches")
+                .select("id")
+                .eq("odds_api_event_id", int(match_id_or_api_id))
+                .limit(1)
+                .execute()
+            )
+            if by_odds_api_event.data:
+                return by_odds_api_event.data[0].get("id")
+    except Exception:
+        logger.exception("Odds API event id lookup failed.")
+
+    try:
+        if match_id_or_api_id.isdigit():
             by_api = (
                 client.table("matches")
                 .select("id")
@@ -324,7 +342,7 @@ def _resolve_match_id(client: Client, match_id_or_api_id: str) -> Optional[str]:
 
 def _fetch_match_base(client: Client, match_id: str) -> Dict[str, Any]:
     full_select = (
-        "id,api_match_id,sofascore_id,home_team_id,away_team_id,league,match_date,status,season,ht_home,ht_away,ft_home,ft_away"
+        "id,api_match_id,sofascore_id,odds_api_event_id,home_team_id,away_team_id,league,match_date,status,season,ht_home,ht_away,ft_home,ft_away"
     )
     fallback_select = "id,api_match_id,home_team_id,away_team_id,league,match_date,status,season,ht_home,ht_away,ft_home,ft_away"
     try:
@@ -711,12 +729,13 @@ def _resolve_sofascore_match_id(client: Client, sofascore_event_id: int) -> Opti
 def _count_odds_rows(client: Client, match_id: Optional[str]) -> int:
     if not match_id:
         return 0
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
     try:
         result = (
             client.table("odds_history")
             .select("id", count="exact")
             .eq("match_id", match_id)
-            .eq("bookmaker", "sofascore")
+            .eq("bookmaker", bookmaker)
             .execute()
         )
         return int(result.count or 0)
@@ -1047,11 +1066,13 @@ def _compute_backtest_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
     try:
         odds_result = (
             client.table("odds_history")
             .select("market_type,current_odd,closing_odd,opening_odd,recorded_at")
             .eq("match_id", match_id)
+            .eq("bookmaker", bookmaker)
             .order("recorded_at", desc=True)
             .limit(1000)
             .execute()
@@ -1075,11 +1096,13 @@ def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
 
 
 def _fetch_bookmaker_odds_entries(client: Client, match_id: str) -> List[Dict[str, Any]]:
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
     try:
         rows = (
             client.table("odds_history")
             .select("bookmaker,market_type,current_odd,closing_odd,opening_odd,recorded_at")
             .eq("match_id", match_id)
+            .eq("bookmaker", bookmaker)
             .order("recorded_at", desc=True)
             .limit(2000)
             .execute()
@@ -1608,7 +1631,6 @@ async def _run_match_analysis(
                 "home": sofa_injuries.get("home", []) or [],
                 "away": sofa_injuries.get("away", []) or [],
             }
-        await sofascore.get_event_odds_history(sofascore_match_id)
 
     if home_sofascore_id > 0 and refresh_live:
         home_recent_form = await sofascore.get_team_recent_matches(home_sofascore_id, limit=6)
@@ -1954,10 +1976,13 @@ async def healthcheck() -> Dict[str, Any]:
         "supabase_connected": supabase_connected,
         "scheduler": scheduler.scheduler_status(),
         "api_football_remaining": scheduler.api_service.requests_remaining,
-        "the_odds_remaining": scheduler.odds_tracker.requests_remaining,
+        "odds_api_remaining": odds_scraper.odds_api.requests_remaining,
+        "the_odds_remaining": odds_scraper.odds_api.requests_remaining,
+        "odds_provider": "betfair_exchange",
         "api_keys": {
             "api_football": bool(os.getenv("API_FOOTBALL_KEY")),
-            "the_odds": bool(os.getenv("THE_ODDS_API_KEY")),
+            "odds_api_io": bool(os.getenv("ODDS_API_IO_KEY") or os.getenv("THE_ODDS_API_KEY")),
+            "the_odds": bool(os.getenv("ODDS_API_IO_KEY") or os.getenv("THE_ODDS_API_KEY")),
             "openweather": bool(os.getenv("OPENWEATHER_API_KEY")) and "BURAYA_" not in str(os.getenv("OPENWEATHER_API_KEY")),
             "supabase_service": bool(os.getenv("SUPABASE_SERVICE_KEY")),
         },
@@ -2197,28 +2222,59 @@ async def test_api_football_odds(fixture_id: int) -> Dict[str, Any]:
     return {"fixture_id": fixture_id, "rows_saved_or_updated": len(rows or []), "sample": (rows or [])[:10]}
 
 
-@app.get("/test/odds/{sofascore_event_id}")
-async def test_sofascore_odds(sofascore_event_id: int) -> Dict[str, Any]:
+@app.get("/test/odds/{odds_api_event_id}")
+async def test_odds_api_odds(odds_api_event_id: int) -> Dict[str, Any]:
     try:
         client = get_supabase_client()
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    match_id_before = _resolve_sofascore_match_id(client, sofascore_event_id)
+    match_id_before = _resolve_match_id(client, str(odds_api_event_id))
     odds_rows_before = _count_odds_rows(client, match_id_before)
-    raw_payload = await sofascore.get_event_odds(sofascore_event_id)
-    match_id_after = _resolve_sofascore_match_id(client, sofascore_event_id)
-    odds_rows_after = _count_odds_rows(client, match_id_after)
+    raw_payload = await odds_scraper.odds_api.get_odds_single(
+        odds_api_event_id,
+        bookmakers=odds_scraper.bookmaker_name,
+        critical=False,
+    )
+    if isinstance(raw_payload, dict):
+        parsed_odds, rejects = odds_scraper._parse_event_odds(raw_payload)
+    else:
+        parsed_odds, rejects = {}, {}
 
-    markets_count = 0
-    if isinstance(raw_payload, dict) and isinstance(raw_payload.get("markets"), list):
-        markets_count = len(raw_payload["markets"])
+    match_id_after = _resolve_match_id(client, str(odds_api_event_id))
+    if match_id_after and parsed_odds:
+        match_status = "scheduled"
+        try:
+            match_row = (
+                client.table("matches")
+                .select("status")
+                .eq("id", match_id_after)
+                .single()
+                .execute()
+                .data
+                or {}
+            )
+            match_status = str(match_row.get("status") or "scheduled")
+        except Exception:
+            match_status = "scheduled"
+        for market, odd in parsed_odds.items():
+            odds_scraper._upsert_odds_history(
+                match_id=match_id_after,
+                market=market,
+                odd=odd,
+                is_finished=match_status.lower() == "finished",
+            )
+            odds_scraper._upsert_odds_snapshot(match_id=match_id_after, market=market, odd=odd, ev=None)
+
+    odds_rows_after = _count_odds_rows(client, match_id_after)
+    markets_count = len(parsed_odds)
 
     return {
-        "sofascore_event_id": sofascore_event_id,
+        "odds_api_event_id": odds_api_event_id,
         "match_id": match_id_after,
         "raw_received": raw_payload is not None,
         "markets_count": markets_count,
+        "rejected": rejects,
         "odds_rows_before": odds_rows_before,
         "odds_rows_after": odds_rows_after,
         "saved_delta": odds_rows_after - odds_rows_before,
@@ -2338,7 +2394,8 @@ async def get_match_odds(match_id: str, refresh: bool = Query(default=False)) ->
 
 @app.post("/admin/refresh-odds")
 async def admin_refresh_odds() -> Dict[str, Any]:
-    result = await scheduler.refresh_sofascore_odds()
+    await scheduler.sync_oddsapi_events()
+    result = await scheduler.refresh_oddsapi_odds()
     return {"status": "ok", **result}
 
 

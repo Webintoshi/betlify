@@ -10,7 +10,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from api_football import ApiFootballService, get_service as get_api_service
 from config import DEFAULT_SEASON, TRACKED_LEAGUE_IDS
-from odds_tracker import OddsTrackerService
 from pi_rating import update_team_pi_ratings
 from services.odds_scraper import OddsScraperService, get_service as get_odds_scraper_service
 from services.prediction_evaluator import evaluate_prediction
@@ -36,7 +35,6 @@ class BettingScheduler:
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.api_service: ApiFootballService = get_api_service()
         self.supabase = self.api_service.supabase
-        self.odds_tracker = OddsTrackerService(supabase_client=self.supabase)
         self.odds_scraper: OddsScraperService = get_odds_scraper_service()
         self.sofascore: SofaScoreService = get_sofascore_service()
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
@@ -76,45 +74,44 @@ class BettingScheduler:
         return result
 
     async def refresh_upcoming_odds(self) -> Dict[str, Any]:
-        if self.supabase is None:
-            return {"processed_matches": 0, "odds_rows": 0}
+        # Legacy alias: route old callers to new Betfair refresh flow.
+        return await self.refresh_oddsapi_odds()
 
-        today = datetime.now(self.timezone).date().isoformat()
-        if self.odds_tracker.requests_remaining is not None and self.odds_tracker.requests_remaining < 20 and self.odds_tracker.low_quota_day == today:
-            logger.warning("Kalan API istegi az (%s), oran guncellemesi atlandi", self.odds_tracker.requests_remaining)
-            return {"processed_matches": 0, "odds_rows": 0, "skipped": True}
+    async def sync_oddsapi_events(self) -> Dict[str, Any]:
+        result = await self.odds_scraper.sync_events(past_hours=24, future_hours=48, max_pages=6)
+        logger.info(
+            "OddsAPI events sync. events=%s matched=%s linked=%s settled_updates=%s unmatched=%s remaining=%s",
+            result.get("events", 0),
+            result.get("matched", 0),
+            result.get("linked", 0),
+            result.get("settled_updates", 0),
+            result.get("unmatched", 0),
+            (result.get("quota", {}) or {}).get("remaining"),
+        )
+        return result
 
-        try:
-            upcoming_result = (
-                self.supabase.table("matches")
-                .select("id,api_match_id,league,status,match_date")
-                .in_("status", ["scheduled", "live"])
-                .order("match_date")
-                .execute()
-            )
-            upcoming = upcoming_result.data or []
-        except Exception:
-            logger.exception("Yaklasan maclar okunamadi.")
-            return {"processed_matches": 0, "odds_rows": 0}
+    async def refresh_oddsapi_odds(self) -> Dict[str, Any]:
+        result = await self.odds_scraper.refresh_todays_matches(timezone_name="Europe/Istanbul")
+        logger.info(
+            "OddsAPI refresh. processed_matches=%s updated_markets=%s rejected=%s remaining=%s",
+            result.get("processed_matches", 0),
+            result.get("updated_markets", 0),
+            result.get("rejected", {}),
+            (result.get("quota", {}) or {}).get("remaining"),
+        )
+        return result
 
-        # The Odds API side feed (league-level).
-        for league_id in TRACKED_LEAGUE_IDS:
-            await self.odds_tracker.get_current_odds(league_id)
-
-        processed = 0
-        odds_rows = 0
-        for match in upcoming:
-            api_match_id = _safe_int(match.get("api_match_id"))
-            match_id = str(match.get("id"))
-            if api_match_id <= 0:
-                continue
-            rows = await self.api_service.get_odds(api_match_id)
-            odds_rows += len(rows or [])
-            await self.odds_tracker.calculate_line_movement(match_id)
-            processed += 1
-
-        logger.info("Oran guncellemesi tamamlandi. match=%s odds_rows=%s", processed, odds_rows)
-        return {"processed_matches": processed, "odds_rows": odds_rows}
+    async def reconcile_oddsapi_results(self) -> Dict[str, Any]:
+        settled = await self.odds_scraper.refresh_settled_results(lookback_hours=48)
+        predictions = await self.refresh_prediction_results()
+        payload = {"settled": settled, "predictions": predictions}
+        logger.info(
+            "OddsAPI results reconcile. settled_updated=%s predictions_evaluated=%s remaining=%s",
+            (settled.get("updated_matches", 0) if isinstance(settled, dict) else 0),
+            (predictions.get("evaluated_predictions", 0) if isinstance(predictions, dict) else 0),
+            ((settled.get("quota", {}) or {}).get("remaining") if isinstance(settled, dict) else None),
+        )
+        return payload
 
     @staticmethod
     def _is_prediction_correct(predicted: str, score_data: Dict[str, int]) -> bool:
@@ -475,10 +472,12 @@ class BettingScheduler:
     def _extract_odds_signal(self, odds_payload: Optional[Dict[str, Any]]) -> int:
         if not isinstance(odds_payload, dict):
             return 0
-        markets = odds_payload.get("markets", [])
-        if not isinstance(markets, list):
-            return 0
-        return min(10, len(markets))
+        markets = odds_payload.get("markets")
+        if isinstance(markets, list):
+            return min(10, len(markets))
+        # Betfair parser sonucu {market_key: odd} formatinda gelebilir.
+        market_count = sum(1 for _, value in odds_payload.items() if isinstance(value, (int, float)))
+        return min(10, market_count)
 
     def _save_sofascore_recalc_prediction(self, match_id: str, confidence: float, outcome: str) -> None:
         if self.supabase is None:
@@ -546,7 +545,7 @@ class BettingScheduler:
 
             lineups = await self.sofascore.get_event_lineups(sofascore_id)
             pregame = await self.sofascore.get_event_pregame_form(sofascore_id)
-            odds = await self.sofascore.get_event_odds(sofascore_id)
+            odds = await self.odds_scraper.get_odds_for_match(match_id)
             injuries = await self.sofascore.get_match_injuries(sofascore_id)
             h2h = await self.sofascore.get_h2h(sofascore_id)
 
@@ -583,9 +582,10 @@ class BettingScheduler:
         return {"processed_matches": processed, "injury_rows": injury_rows, "h2h_rows": h2h_rows}
 
     async def refresh_sofascore_odds(self) -> Dict[str, Any]:
-        result = await self.odds_scraper.refresh_todays_matches(timezone_name="Europe/Istanbul")
+        # Legacy alias: keep existing call sites without changing response shape.
+        result = await self.refresh_oddsapi_odds()
         logger.info(
-            "Sofascore odds gorevi tamamlandi. processed_matches=%s updated_markets=%s",
+            "Odds refresh gorevi tamamlandi. processed_matches=%s updated_markets=%s",
             result.get("processed_matches", 0),
             result.get("updated_markets", 0),
         )
@@ -611,10 +611,17 @@ class BettingScheduler:
             replace_existing=True,
         )
         self.scheduler.add_job(
-            self.refresh_upcoming_odds,
+            self.sync_oddsapi_events,
             "interval",
-            hours=3,
-            id="odds-refresh-3h",
+            minutes=15,
+            id="oddsapi-events-sync",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.refresh_oddsapi_odds,
+            "interval",
+            minutes=30,
+            id="oddsapi-odds-refresh",
             replace_existing=True,
         )
         self.scheduler.add_job(
@@ -666,17 +673,10 @@ class BettingScheduler:
             replace_existing=True,
         )
         self.scheduler.add_job(
-            self.refresh_sofascore_odds,
-            "interval",
-            minutes=30,
-            id="sofascore-odds-30m",
-            replace_existing=True,
-        )
-        self.scheduler.add_job(
-            self.refresh_prediction_results,
+            self.reconcile_oddsapi_results,
             "interval",
             minutes=5,
-            id="results-reconcile-5m",
+            id="oddsapi-results-reconcile",
             replace_existing=True,
         )
         self.scheduler.add_job(
@@ -698,7 +698,6 @@ class BettingScheduler:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
         await self.api_service.close()
-        await self.odds_tracker.close()
         await self.odds_scraper.close()
         await self.sofascore.close()
         await self.transfermarkt.close()

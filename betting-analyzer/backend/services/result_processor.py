@@ -31,6 +31,16 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def _parse_iso(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _chunks(values: Sequence[str], size: int = 300) -> Iterable[Sequence[str]]:
     step = max(1, int(size))
     for index in range(0, len(values), step):
@@ -76,7 +86,9 @@ def _build_actual_outcome_text(result: Dict[str, Any]) -> str:
 
 
 def _update_match_result_columns(client: Client, match_id: str, result: Dict[str, Any]) -> None:
-    payload: Dict[str, Any] = {"status": str(result.get("status") or "finished")}
+    raw_status = str(result.get("status") or "finished").strip().lower()
+    normalized_status = "finished" if raw_status in {"settled", "finished"} else raw_status or "finished"
+    payload: Dict[str, Any] = {"status": normalized_status}
     if _has_column(client, "matches", "ft_home"):
         payload["ft_home"] = _safe_int(result.get("home_score"))
     if _has_column(client, "matches", "ft_away"):
@@ -133,8 +145,8 @@ def _fetch_match_rows(client: Client, match_ids: List[str]) -> Dict[str, Dict[st
     if not match_ids:
         return {}
     columns = ["id", "status", "match_date"]
-    if _has_column(client, "matches", "sofascore_id"):
-        columns.append("sofascore_id")
+    if _has_column(client, "matches", "odds_api_event_id"):
+        columns.append("odds_api_event_id")
     if _has_column(client, "matches", "ft_home"):
         columns.append("ft_home")
     if _has_column(client, "matches", "ft_away"):
@@ -233,7 +245,7 @@ async def process_pending_predictions(
     event_cache: Dict[int, Dict[str, Any]] = {}
     finished_by_match: Dict[str, Dict[str, Any]] = {}
     api_calls = 0
-    skipped_without_sofascore = 0
+    skipped_without_event_id = 0
 
     for match_id in match_ids:
         row = match_map.get(match_id)
@@ -246,9 +258,15 @@ async def process_pending_predictions(
             finished_by_match[match_id] = _result_from_match_row(row)
             continue
 
-        event_id = _safe_int(row.get("sofascore_id"))
+        match_date = _parse_iso(row.get("match_date"))
+        now_utc = datetime.now(timezone.utc)
+        if status in {"scheduled", "pending", "upcoming", "notstarted", "ns"} and match_date and match_date > now_utc:
+            # Henuz oynanmamis maclar icin result API cagrisi yapma.
+            continue
+
+        event_id = _safe_int(row.get("odds_api_event_id"), fallback=0)
         if event_id <= 0:
-            skipped_without_sofascore += 1
+            skipped_without_event_id += 1
             continue
 
         if event_id not in event_cache:
@@ -308,7 +326,8 @@ async def process_pending_predictions(
         "api_calls": api_calls,
         "evaluated_predictions": evaluated,
         "correct_predictions": correct,
-        "skipped_without_sofascore_id": skipped_without_sofascore,
+        "skipped_without_event_id": skipped_without_event_id,
+        "skipped_without_sofascore_id": skipped_without_event_id,
         "skipped_unknown_market": unknown_market,
     }
 
@@ -493,4 +512,3 @@ async def list_prediction_results(
         )
 
     return items
-
