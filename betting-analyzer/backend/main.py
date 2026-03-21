@@ -2365,6 +2365,24 @@ async def test_sofascore(date: str) -> Dict[str, Any]:
     }
 
 
+@app.get("/test/sofascore/top-players/{team_id}")
+async def test_sofascore_top_players(team_id: int) -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    parsed = await sofascore.get_team_top_players(team_id, limit=10)
+    raw_overall = await sofascore._request(f"/team/{team_id}/top-players/overall", ttl_seconds=60)
+    raw_top = await sofascore._request(f"/team/{team_id}/top-players", ttl_seconds=60)
+    raw_players = await sofascore._request(f"/team/{team_id}/players", ttl_seconds=60)
+    return {
+        "team_id": team_id,
+        "parsed_count": len(parsed),
+        "parsed": parsed,
+        "raw_overall": raw_overall,
+        "raw_top": raw_top,
+        "raw_players": raw_players,
+    }
+
+
 @app.post("/analyze/{match_id}")
 async def analyze_match_endpoint(
     match_id: str,
