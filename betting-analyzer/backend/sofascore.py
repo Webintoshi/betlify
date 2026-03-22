@@ -100,8 +100,99 @@ def _normalize_name(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
 
+def _canonical_country_name(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = _normalize_name(text)
+    aliases = {
+        "turkey": "Türkiye",
+        "turkiye": "Türkiye",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    return text or "Unknown"
+
+
+def _canonical_league_name(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = _normalize_name(text)
+    aliases = {
+        "turkiyesuperlig": "Trendyol Süper Lig",
+        "turkiyesuperleague": "Trendyol Süper Lig",
+        "turkeysuperlig": "Trendyol Süper Lig",
+        "superlig": "Trendyol Süper Lig",
+        "trendyolsuperlig": "Trendyol Süper Lig",
+        "turkiye1lig": "Trendyol 1. Lig",
+        "tff1lig": "Trendyol 1. Lig",
+        "trendyol1lig": "Trendyol 1. Lig",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    return text or "Unknown"
+
+
 def _normalize_competition_name(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _is_specific_country(value: Any) -> bool:
+    normalized = _normalize_competition_name(_canonical_country_name(value))
+    return normalized not in {"", "unknown", "europe", "world"}
+
+
+def _is_secondary_competition(value: Any) -> bool:
+    normalized = _normalize_competition_name(_canonical_league_name(value))
+    if not normalized or normalized == "unknown":
+        return True
+    keywords = (
+        "uefa",
+        "champions league",
+        "europa league",
+        "conference league",
+        "nations league",
+        "world cup",
+        "euro",
+        "cup",
+        "super cup",
+        "league cup",
+        "u19",
+        "u21",
+        "u23",
+        "youth",
+        "women",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _prefer_country(existing_value: Any, incoming_value: Any) -> str:
+    existing = _canonical_country_name(existing_value)
+    incoming = _canonical_country_name(incoming_value)
+    if _is_specific_country(existing) and not _is_specific_country(incoming):
+        return existing
+    if _is_specific_country(incoming) and not _is_specific_country(existing):
+        return incoming
+    if _normalize_competition_name(existing) in {"europe", "world"} and _is_specific_country(incoming):
+        return incoming
+    if _normalize_competition_name(incoming) in {"europe", "world"} and _is_specific_country(existing):
+        return existing
+    return incoming or existing or "Unknown"
+
+
+def _prefer_league(existing_value: Any, incoming_value: Any) -> str:
+    existing = _canonical_league_name(existing_value)
+    incoming = _canonical_league_name(incoming_value)
+    if existing not in {"", "Unknown"} and incoming in {"", "Unknown"}:
+        return existing
+    if incoming not in {"", "Unknown"} and existing in {"", "Unknown"}:
+        return incoming
+    if existing not in {"", "Unknown"} and incoming not in {"", "Unknown"}:
+        existing_secondary = _is_secondary_competition(existing)
+        incoming_secondary = _is_secondary_competition(incoming)
+        if existing_secondary and not incoming_secondary:
+            return incoming
+        if not existing_secondary and incoming_secondary:
+            return existing
+        return existing
+    return incoming or existing or "Unknown"
 
 
 def _is_stale_timestamp(raw_value: Any, *, days: int = SOFASCORE_PROFILE_STALE_DAYS) -> bool:
@@ -479,6 +570,22 @@ class SofaScoreService:
         except Exception:
             return None
 
+    def _get_team_row(self, team_id: str) -> Optional[Dict[str, Any]]:
+        if self.supabase is None or not team_id:
+            return None
+        try:
+            result = (
+                self.supabase.table("teams")
+                .select("id,name,league,country,sofascore_id,api_team_id,logo_url,coach_name,created_at")
+                .eq("id", team_id)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
     def _resolve_canonical_team_id(
         self,
         *,
@@ -494,22 +601,23 @@ class SofaScoreService:
             return stable_uuid("sofascore-team", sofascore_team_id)
 
         normalized_name = _normalize_name(team_name)
-        normalized_league = str(league_name or "Unknown").strip()
-        normalized_country = str(country_name or "Unknown").strip()
-        select_columns = "id,name,league,country,created_at"
+        normalized_league = _canonical_league_name(league_name)
+        normalized_country = _canonical_country_name(country_name)
+        select_columns = "id,name,league,country,created_at,api_team_id,logo_url,coach_name"
         if self._has_column("teams", "sofascore_id"):
             select_columns += ",sofascore_id"
 
         candidates: List[Dict[str, Any]] = []
         try:
-            result = (
+            query = (
                 self.supabase.table("teams")
                 .select(select_columns)
                 .eq("league", normalized_league)
-                .eq("country", normalized_country)
                 .limit(200)
-                .execute()
             )
+            if _is_specific_country(normalized_country):
+                query = query.eq("country", normalized_country)
+            result = query.execute()
             candidates = result.data or []
         except Exception:
             candidates = []
@@ -525,6 +633,9 @@ class SofaScoreService:
                 key=lambda row: (
                     0 if _safe_int(row.get("sofascore_id")) == sofascore_team_id and sofascore_team_id > 0 else 1,
                     0 if _safe_int(row.get("sofascore_id")) > 0 else 1,
+                    0 if str(row.get("country") or "").strip() not in {"", "Unknown"} else 1,
+                    0 if str(row.get("logo_url") or "").strip() else 1,
+                    0 if str(row.get("coach_name") or "").strip() else 1,
                     str(row.get("created_at") or ""),
                     str(row.get("id") or ""),
                 )
@@ -589,14 +700,15 @@ class SofaScoreService:
     def _sync_team_profile_to_teams_table(self, *, team_id: str, payload: Dict[str, Any]) -> bool:
         if self.supabase is None or not team_id:
             return False
+        existing_row = self._get_team_row(team_id) or {}
         update_payload: Dict[str, Any] = {}
         team_name = str(payload.get("team_name") or "").strip()
         if team_name:
             update_payload["name"] = team_name
-        country = str(payload.get("country") or "").strip()
+        country = _prefer_country(existing_row.get("country"), payload.get("country"))
         if country:
             update_payload["country"] = country
-        league_name = str(payload.get("league") or "").strip()
+        league_name = _prefer_league(existing_row.get("league"), payload.get("league"))
         if league_name:
             update_payload["league"] = league_name
         if self._has_column("teams", "slug"):
@@ -667,13 +779,13 @@ class SofaScoreService:
         return {
             "team_sofascore_id": int(team_id),
             "team_name": str(team.get("name") or f"Team {team_id}").strip(),
-            "country": country or None,
+            "country": _canonical_country_name(country) or None,
             "logo_url": self._team_logo_url(team_id),
             "coach_name": coach_name,
             "coach_sofascore_id": _safe_int(manager.get("id")) or None,
             "slug": slug or None,
             "sofascore_url": self._team_profile_url(team_id, slug=slug),
-            "league": league_name or None,
+            "league": _canonical_league_name(league_name) or None,
             "team_status": "inactive" if bool(team.get("disabled")) else "active",
             "payload": payload,
         }
@@ -1738,14 +1850,17 @@ class SofaScoreService:
             return None
 
         team_name = str(team_payload.get("name") or f"Team {sofascore_team_id}").strip()
-        resolved_league_name = str(league_name or "Unknown").strip() or "Unknown"
-        resolved_country_name = str(country_name or "Unknown").strip() or "Unknown"
+        resolved_league_name = _canonical_league_name(league_name)
+        resolved_country_name = _canonical_country_name(country_name)
         team_uuid = self._resolve_canonical_team_id(
             team_name=team_name,
             league_name=resolved_league_name,
             country_name=resolved_country_name,
             sofascore_team_id=sofascore_team_id,
         )
+        existing_row = self._get_team_row(team_uuid) or {}
+        resolved_league_name = _prefer_league(existing_row.get("league"), resolved_league_name)
+        resolved_country_name = _prefer_country(existing_row.get("country"), resolved_country_name)
         has_sofascore_column = self._has_column("teams", "sofascore_id")
         slug = str(team_payload.get("slug") or "").strip()
         record = {

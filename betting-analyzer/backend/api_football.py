@@ -32,6 +32,36 @@ def _normalize_name(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
 
+def _canonical_country_name(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = _normalize_name(text)
+    aliases = {
+        "turkey": "Türkiye",
+        "turkiye": "Türkiye",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    return text or "Unknown"
+
+
+def _canonical_league_name(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = _normalize_name(text)
+    aliases = {
+        "turkiyesuperlig": "Trendyol Süper Lig",
+        "turkiyesuperleague": "Trendyol Süper Lig",
+        "turkeysuperlig": "Trendyol Süper Lig",
+        "superlig": "Trendyol Süper Lig",
+        "trendyolsuperlig": "Trendyol Süper Lig",
+        "turkiye1lig": "Trendyol 1. Lig",
+        "tff1lig": "Trendyol 1. Lig",
+        "trendyol1lig": "Trendyol 1. Lig",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    return text or "Unknown"
+
+
 def map_fixture_status(raw_status: str) -> str:
     normalized = (raw_status or "").upper()
     if normalized in {"FT", "AET", "PEN", "CANC", "PST"}:
@@ -152,16 +182,19 @@ class ApiFootballService:
             return stable_uuid("api-football-team", api_team_id)
 
         normalized_name = _normalize_name(team_name)
+        normalized_league_name = _canonical_league_name(league_name)
+        normalized_country_name = _canonical_country_name(country_name)
         candidates: List[Dict[str, Any]] = []
         try:
-            result = (
+            query = (
                 self.supabase.table("teams")
-                .select("id,name,league,country,created_at,api_team_id")
-                .eq("league", str(league_name or "Unknown").strip() or "Unknown")
-                .eq("country", str(country_name or "Unknown").strip() or "Unknown")
-                .limit(200)
-                .execute()
+                .select("id,name,league,country,created_at,api_team_id,sofascore_id,logo_url,coach_name")
+                .eq("league", normalized_league_name)
+                .limit(300)
             )
+            if normalized_country_name != "Unknown":
+                query = query.eq("country", normalized_country_name)
+            result = query.execute()
             candidates = result.data or []
         except Exception:
             candidates = []
@@ -170,7 +203,11 @@ class ApiFootballService:
         if exact_candidates:
             exact_candidates.sort(
                 key=lambda row: (
+                    0 if self._safe_int(row.get("sofascore_id")) > 0 else 1,
+                    0 if str(row.get("country") or "").strip() not in {"", "Unknown"} else 1,
                     0 if self._safe_int(row.get("api_team_id")) == api_team_id and api_team_id > 0 else 1,
+                    0 if str(row.get("logo_url") or "").strip() else 1,
+                    0 if str(row.get("coach_name") or "").strip() else 1,
                     str(row.get("created_at") or ""),
                     str(row.get("id") or ""),
                 )
@@ -300,8 +337,8 @@ class ApiFootballService:
             return None
 
         team_name = str(team_payload.get("name") or f"Team {api_team_id}").strip()
-        resolved_league_name = str(league_name or "Unknown").strip() or "Unknown"
-        resolved_country_name = str(country_name or "Unknown").strip() or "Unknown"
+        resolved_league_name = _canonical_league_name(league_name)
+        resolved_country_name = _canonical_country_name(country_name)
         team_uuid = self._resolve_canonical_team_id(
             team_name=team_name,
             league_name=resolved_league_name,
