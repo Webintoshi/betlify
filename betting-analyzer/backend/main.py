@@ -17,19 +17,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
-from analyzer import (
-    analyze_match,
-    calculate_all_market_probabilities,
-    calculate_halftime_lambdas,
-    calculate_lambdas,
-    rho_fit,
-)
 from api_football import get_service as get_api_service
 from config import ENABLE_SOFASCORE_ENRICHMENT, TRACKED_LEAGUE_IDS
-from ev_calculator import SUPPORTED_MARKETS, evaluate_markets
 from pi_rating import calculate_pi_ratings
+from prediction_engine.config.markets import SUPPORTED_MARKETS
+from prediction_engine.engine import run as run_prediction_engine
 from scheduler import BettingScheduler
-from services.analysis_engine import run_analysis as run_divine_analysis
 from services.odds_scraper import get_service as get_odds_scraper_service
 from services.result_processor import build_performance_summary, list_prediction_results, process_pending_predictions
 from sofascore import get_service as get_sofascore_service
@@ -70,14 +63,17 @@ reset_refetch_state: Dict[str, Any] = {
     "started_at": None,
     "finished_at": None,
     "processed": 0,
+    "total_matches_scanned": 0,
     "success": 0,
     "failed": 0,
+    "skipped_no_odds": 0,
     "last_error": None,
 }
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    scheduler.set_match_analyzer(_run_match_analysis)
     scheduler.start()
     try:
         yield
@@ -233,8 +229,10 @@ async def _run_reset_and_refetch() -> None:
             "started_at": datetime.now(scheduler.timezone).isoformat(),
             "finished_at": None,
             "processed": 0,
+            "total_matches_scanned": 0,
             "success": 0,
             "failed": 0,
+            "skipped_no_odds": 0,
             "last_error": None,
         }
     )
@@ -248,35 +246,62 @@ async def _run_reset_and_refetch() -> None:
             client.table("market_probabilities").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
         except Exception:
             logger.warning("Market probability reset skipped.")
-
-        now = datetime.now(scheduler.timezone)
         try:
-            matches = (
-                client.table("matches")
-                .select("id,match_date,status")
-                .gte("match_date", (now - timedelta(days=1)).isoformat())
-                .order("match_date")
-                .limit(2000)
-                .execute()
-                .data
-                or []
-            )
+            client.table("odds").update({"ev": None}).neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        except Exception:
+            logger.warning("Odds EV reset skipped.")
+
+        try:
+            client.table("matches").update({"confidence_score": 0, "best_bet": None}).neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        except Exception:
+            logger.warning("Match confidence/best_bet reset skipped.")
+
+        try:
+            matches: List[Dict[str, Any]] = []
+            batch_size = 1000
+            offset = 0
+            while True:
+                chunk = (
+                    client.table("matches")
+                    .select("id,match_date,status")
+                    .order("match_date")
+                    .range(offset, offset + batch_size - 1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not chunk:
+                    break
+                matches.extend(chunk)
+                if len(chunk) < batch_size:
+                    break
+                offset += batch_size
         except Exception:
             matches = []
 
-        eligible = [
-            row
-            for row in matches
-            if str(row.get("status", "scheduled")).lower() in {"scheduled", "upcoming", "notstarted", "ns"}
-        ]
-
+        total_scanned = len(matches)
         success = 0
         failed = 0
-        for idx, match in enumerate(eligible, start=1):
+        skipped_no_odds = 0
+
+        for idx, match in enumerate(matches, start=1):
             match_id = str(match.get("id") or "").strip()
             if not match_id:
                 continue
             try:
+                odds_map = _fetch_odds(client, match_id)
+                if not odds_map:
+                    skipped_no_odds += 1
+                    reset_refetch_state.update(
+                        {
+                            "processed": idx,
+                            "total_matches_scanned": total_scanned,
+                            "success": success,
+                            "failed": failed,
+                            "skipped_no_odds": skipped_no_odds,
+                        }
+                    )
+                    continue
                 await _run_match_analysis(match_id, confidence_threshold=51.0, include_details=False, refresh_live=False)
                 success += 1
             except Exception:
@@ -286,8 +311,10 @@ async def _run_reset_and_refetch() -> None:
             reset_refetch_state.update(
                 {
                     "processed": idx,
+                    "total_matches_scanned": total_scanned,
                     "success": success,
                     "failed": failed,
+                    "skipped_no_odds": skipped_no_odds,
                 }
             )
 
@@ -296,9 +323,11 @@ async def _run_reset_and_refetch() -> None:
                 "status": "completed",
                 "running": False,
                 "finished_at": datetime.now(scheduler.timezone).isoformat(),
-                "processed": len(eligible),
+                "processed": len(matches),
+                "total_matches_scanned": total_scanned,
                 "success": success,
                 "failed": failed,
+                "skipped_no_odds": skipped_no_odds,
                 "last_error": None,
             }
         )
@@ -1253,6 +1282,7 @@ def _fetch_bookmaker_odds_entries(client: Client, match_id: str) -> List[Dict[st
 def _build_engine_match_data(
     *,
     match_id: str,
+    league: str,
     home_stats: List[Dict[str, Any]],
     away_stats: List[Dict[str, Any]],
     home_form_payload: Dict[str, Any],
@@ -1277,6 +1307,7 @@ def _build_engine_match_data(
 
     return {
         "match_id": match_id,
+        "league": league,
         "home_team_stats": {
             "last6": home_form_payload.get("last6", []),
             "avg_xg_for": home_avg_xg_for,
@@ -1284,6 +1315,7 @@ def _build_engine_match_data(
             "avg_goals_for": home_avg_goals_for,
             "avg_goals_against": home_avg_goals_against,
             "home_avg_goals_for": home_avg_goals_for,
+            "home_avg_goals_against": home_avg_goals_against,
         },
         "away_team_stats": {
             "last6": away_form_payload.get("last6", []),
@@ -1292,6 +1324,7 @@ def _build_engine_match_data(
             "avg_goals_for": away_avg_goals_for,
             "avg_goals_against": away_avg_goals_against,
             "away_avg_goals_for": away_avg_goals_for,
+            "away_avg_goals_against": away_avg_goals_against,
         },
         "h2h": {
             "avg_home_goals": avg_h2h_home,
@@ -1343,8 +1376,12 @@ def _build_ev_result_from_engine(
     engine_result: Dict[str, Any],
     confidence_threshold: float,
 ) -> Dict[str, Any]:
-    engine_markets = engine_result.get("ev", {}) if isinstance(engine_result.get("ev"), dict) else {}
-    all_markets = _convert_engine_markets(engine_markets.get("all_markets", []) or [])
+    all_rows: List[Dict[str, Any]] = []
+    if isinstance(engine_result.get("all_markets"), list):
+        all_rows = engine_result.get("all_markets", []) or []
+    elif isinstance(engine_result.get("ev"), dict):
+        all_rows = (engine_result.get("ev", {}) or {}).get("all_markets", []) or []
+    all_markets = _convert_engine_markets(all_rows)
 
     confidence_score = float(engine_result.get("confidence_score", 0.0) or 0.0)
     best_market: Optional[Dict[str, Any]] = None
@@ -1546,42 +1583,29 @@ def _build_match_context(
     }
 
 
-def _build_market_probabilities(confidence_score: float, context: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
-    _ = confidence_score
-    lambda_home, lambda_away = calculate_lambdas(
-        home_attack=float(context.get("home_attack", 1.2) or 1.2),
-        home_defense=float(context.get("home_defense", 1.1) or 1.1),
-        away_attack=float(context.get("away_attack", 1.1) or 1.1),
-        away_defense=float(context.get("away_defense", 1.2) or 1.2),
-        league_avg_goals=float(context.get("league_avg_goals", 1.35) or 1.35),
-        home_advantage=float(context.get("home_advantage", 1.15) or 1.15),
-        home_xg=float(context.get("home_attack_xg", 1.2) or 1.2),
-        away_xg=float(context.get("away_attack_xg", 1.1) or 1.1),
-        xg_weight=0.4,
-    )
-    ht_lambda_home, ht_lambda_away = calculate_halftime_lambdas(
-        lambda_home,
-        lambda_away,
-        ht_home_ratio=float(context.get("ht_home_ratio", 0.42) or 0.42),
-        ht_away_ratio=float(context.get("ht_away_ratio", 0.40) or 0.40),
-    )
-    rho = rho_fit(initial_rho=-0.10)
-    probabilities_raw = calculate_all_market_probabilities(
-        lambda_home=lambda_home,
-        lambda_away=lambda_away,
-        ht_lambda_home=ht_lambda_home,
-        ht_lambda_away=ht_lambda_away,
-        rho=rho,
-    )
-    probabilities = {market: float(probabilities_raw.get(market, 0.5)) for market in SUPPORTED_MARKETS}
-    lambda_payload = {
-        "home": round(lambda_home, 4),
-        "away": round(lambda_away, 4),
-        "ht_home": round(ht_lambda_home, 4),
-        "ht_away": round(ht_lambda_away, 4),
-        "rho": round(float(rho), 4),
+def _clamp_score(value: float) -> float:
+    return max(0.0, min(100.0, float(value)))
+
+
+def _build_criteria_scores_from_context(context: Dict[str, Any]) -> Dict[str, float]:
+    opening = float(context.get("opening_odd", 0.0) or 0.0)
+    closing = float(context.get("closing_odd", opening) or opening)
+    movement_ratio = 0.0
+    if opening > 0:
+        movement_ratio = (opening - closing) / opening
+
+    return {
+        "form_last6_xg": _clamp_score((float(context.get("form_points_last6", 9.0) or 9.0) / 18.0) * 100.0),
+        "squad_availability": _clamp_score(float(context.get("squad_availability", 0.5) or 0.5) * 100.0),
+        "xg_rolling_10": _clamp_score((float(context.get("xg_rolling_diff_10", 0.0) or 0.0) + 2.0) / 4.0 * 100.0),
+        "market_value": _clamp_score((float(context.get("market_value_delta_pct", 0.0) or 0.0) + 50.0)),
+        "odds_movement": _clamp_score((movement_ratio + 1.0) / 2.0 * 100.0),
+        "h2h_recent": _clamp_score(float(context.get("h2h_points_ratio", 0.5) or 0.5) * 100.0),
+        "standing_motivation": _clamp_score(float(context.get("standing_pressure", 0.5) or 0.5) * 100.0),
+        "social_sentiment": _clamp_score((float(context.get("social_sentiment_score", 0.0) or 0.0) + 1.0) / 2.0 * 100.0),
+        "weather_pitch": _clamp_score(float(context.get("weather_score", 50.0) or 50.0)),
+        "pi_rating_delta": _clamp_score((float(context.get("pi_rating_delta", 0.0) or 0.0) + 300.0) / 600.0 * 100.0),
     }
-    return probabilities, lambda_payload
 
 
 def _save_market_probabilities(
@@ -1597,7 +1621,7 @@ def _save_market_probabilities(
             "probability": float(probability),
             "lambda_home": float(lambda_payload.get("home", 0.0) or 0.0),
             "lambda_away": float(lambda_payload.get("away", 0.0) or 0.0),
-            "model_version": "dixon-coles-v1",
+            "model_version": "prediction-engine-v3",
         }
         try:
             client.table("market_probabilities").upsert(row, on_conflict="match_id,market").execute()
@@ -2184,7 +2208,6 @@ async def _run_match_analysis(
         context["h2h_matches"] = h2h_rows
     home_form_payload = _build_form_payload(recent_matches=home_recent_form, fallback_stats=home_stats)
     away_form_payload = _build_form_payload(recent_matches=away_recent_form, fallback_stats=away_stats)
-    analysis_legacy = analyze_match(context, confidence_threshold=confidence_threshold)
 
     bookmaker_odds = _fetch_bookmaker_odds_entries(client, resolved_match_id)
     if live_odds:
@@ -2201,14 +2224,22 @@ async def _run_match_analysis(
 
     engine_match_data = _build_engine_match_data(
         match_id=resolved_match_id,
+        league=str(match_row.get("league", "") or "default"),
         home_stats=home_stats,
         away_stats=away_stats,
         home_form_payload=home_form_payload,
         away_form_payload=away_form_payload,
         h2h_rows=h2h_rows,
     )
-    engine_result = run_divine_analysis(engine_match_data, bookmaker_odds)
-    engine_confidence = float(engine_result.get("confidence_score", analysis_legacy.get("confidence_score", 0.0)) or 0.0)
+    engine_result = run_prediction_engine(
+        match_data=engine_match_data,
+        home_stats=engine_match_data.get("home_team_stats", {}),
+        away_stats=engine_match_data.get("away_team_stats", {}),
+        h2h=engine_match_data.get("h2h", {}),
+        bookmakers=bookmaker_odds,
+        opening_odds=stored_odds,
+    )
+    engine_confidence = float(engine_result.get("confidence_score", 0.0) or 0.0)
 
     probabilities = {
         str(market): float(probability)
@@ -2220,32 +2251,20 @@ async def _run_match_analysis(
         "ht_home": float((engine_result.get("lambda", {}) or {}).get("ht_home", 0.0) or 0.0),
         "ht_away": float((engine_result.get("lambda", {}) or {}).get("ht_away", 0.0) or 0.0),
     }
-    if not probabilities:
-        probabilities, lambda_payload = _build_market_probabilities(engine_confidence, context)
-
-    odd_map = {
-        market: float(odd)
-        for market, odd in odds.items()
-        if market in SUPPORTED_MARKETS and float(odd) > 0
-    }
     ev_result = _build_ev_result_from_engine(
         engine_result=engine_result,
         confidence_threshold=confidence_threshold,
     )
-    if not ev_result.get("all_markets"):
-        ev_result = evaluate_markets(
-            market_probabilities=probabilities,
-            market_odds=odd_map,
-            confidence_score=engine_confidence,
-            confidence_threshold=confidence_threshold,
-        )
-
+    criteria_scores = _build_criteria_scores_from_context(context)
+    criteria_average = round(sum(criteria_scores.values()) / max(len(criteria_scores), 1), 2)
     analysis = {
-        **analysis_legacy,
         "confidence_score": round(engine_confidence, 2),
         "recommended": bool(ev_result.get("recommended", False)),
-        "engine": str((engine_result.get("meta", {}) or {}).get("model", "Dixon-Coles v2.0")),
-        "confidence_detail": engine_result.get("confidence_detail", {}),
+        "engine": str((engine_result.get("meta", {}) or {}).get("model", "prediction-engine-v3")),
+        "criteria_scores": criteria_scores,
+        "score_breakdown": criteria_scores,
+        "criteria_average": criteria_average,
+        "confidence_detail": {},
     }
     _save_market_probabilities(client, resolved_match_id, probabilities, lambda_payload)
     _save_predictions(client, resolved_match_id, ev_result, lambda_payload=lambda_payload)
@@ -2269,7 +2288,7 @@ async def _run_match_analysis(
         }
         if best_market
         else None,
-        "meta": engine_result.get("meta", {"model": "Dixon-Coles v2.0"}),
+        "meta": engine_result.get("meta", {"model": "prediction-engine-v3"}),
     }
     if include_details:
         home_team = team_rows.get(str(match_row["home_team_id"]), {})
@@ -2438,8 +2457,10 @@ async def admin_stats() -> Dict[str, Any]:
             "started_at": reset_refetch_state.get("started_at"),
             "finished_at": reset_refetch_state.get("finished_at"),
             "processed": reset_refetch_state.get("processed"),
+            "total_matches_scanned": reset_refetch_state.get("total_matches_scanned"),
             "success": reset_refetch_state.get("success"),
             "failed": reset_refetch_state.get("failed"),
+            "skipped_no_odds": reset_refetch_state.get("skipped_no_odds"),
             "last_error": reset_refetch_state.get("last_error"),
         },
     }
@@ -3120,14 +3141,24 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
     today = datetime.now(scheduler.timezone).date().isoformat()
     tomorrow = (datetime.now(scheduler.timezone).date() + timedelta(days=1)).isoformat()
     try:
-        result = (
-            client.table("matches")
-            .select("id,league,match_date,status,home_team_id,away_team_id")
-            .gte("match_date", f"{today}T00:00:00")
-            .lte("match_date", f"{tomorrow}T23:59:59")
-            .order("match_date")
-            .execute()
-        )
+        try:
+            result = (
+                client.table("matches")
+                .select("id,league,match_date,status,home_team_id,away_team_id,confidence_score,best_bet")
+                .gte("match_date", f"{today}T00:00:00")
+                .lte("match_date", f"{tomorrow}T23:59:59")
+                .order("match_date")
+                .execute()
+            )
+        except Exception:
+            result = (
+                client.table("matches")
+                .select("id,league,match_date,status,home_team_id,away_team_id")
+                .gte("match_date", f"{today}T00:00:00")
+                .lte("match_date", f"{tomorrow}T23:59:59")
+                .order("match_date")
+                .execute()
+            )
     except Exception as exc:
         logger.exception("matches/today query failed.")
         raise HTTPException(status_code=500, detail="Failed to list matches.") from exc
@@ -3145,42 +3176,43 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
         except Exception:
             logger.exception("teams map read failed.")
 
+    prediction_map: Dict[str, Dict[str, Any]] = {}
+    match_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    if match_ids:
+        try:
+            prediction_rows = (
+                client.table("predictions")
+                .select("match_id,market_type,confidence_score,ev_percentage,recommended,created_at")
+                .in_("match_id", match_ids)
+                .order("created_at", desc=True)
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+            for row in prediction_rows:
+                match_id = str(row.get("match_id") or "").strip()
+                if match_id and match_id not in prediction_map:
+                    prediction_map[match_id] = row
+        except Exception:
+            logger.exception("predictions map read failed.")
+
     items: List[Dict[str, Any]] = []
     for row in rows:
-        odds = _fetch_odds(client, str(row["id"]))
-        context = {
-            "form_points_last6": 9.0,
-            "xg_diff_last6": 0.0,
-            "missing_players": 0.0,
-            "key_absences": 0.0,
-            "xg_rolling_diff_10": 0.0,
-            "market_value_delta_pct": 0.0,
-            "opening_odd": odds.get("MS1"),
-            "closing_odd": odds.get("MS1"),
-            "h2h_points_ratio": 0.5,
-            "h2h_matches": [],
-            "standing_pressure": 0.5,
-            "competition_type": "league",
-            "competition_stage": "regular",
-            "social_sentiment_score": 0.0,
-            "weather_impact_score": 0.0,
-            "pi_rating_delta": 0.0,
-        }
-        analysis = analyze_match(context, confidence_threshold=min_confidence)
-        probabilities, _lambda_payload = _build_market_probabilities(analysis["confidence_score"], context)
-        market_odds = {
-            market: float(odd)
-            for market, odd in odds.items()
-            if market in SUPPORTED_MARKETS and float(odd) > 0
-        }
-        ev = evaluate_markets(
-            market_probabilities=probabilities,
-            market_odds=market_odds,
-            confidence_score=analysis["confidence_score"],
-            confidence_threshold=min_confidence,
+        match_id = str(row.get("id") or "")
+        prediction = prediction_map.get(match_id, {})
+        confidence_score = float(
+            prediction.get("confidence_score")
+            if prediction.get("confidence_score") is not None
+            else row.get("confidence_score", 0.0) or 0.0
         )
-        best_market = ev.get("best_market") or {}
-        recommended_flag = bool(best_market.get("recommended", ev.get("recommended", False)))
+        market_type = str(
+            prediction.get("market_type")
+            or row.get("best_bet")
+            or "MS1"
+        )
+        ev_percentage = float(prediction.get("ev_percentage", 0.0) or 0.0)
+        recommended_flag = bool(prediction.get("recommended", False)) and confidence_score >= float(min_confidence)
         items.append(
             {
                 "match_id": row["id"],
@@ -3191,10 +3223,10 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
                 "away_team": str((teams_map.get(row["away_team_id"], {}) or {}).get("name", "Away Team")),
                 "home_logo_url": (teams_map.get(row["home_team_id"], {}) or {}).get("logo_url"),
                 "away_logo_url": (teams_map.get(row["away_team_id"], {}) or {}).get("logo_url"),
-                "confidence_score": analysis["confidence_score"],
+                "confidence_score": round(confidence_score, 2),
                 "recommended": recommended_flag,
-                "market_type": best_market.get("market_type", "MS1"),
-                "ev_percentage": best_market.get("ev_percentage", 0.0),
+                "market_type": market_type,
+                "ev_percentage": ev_percentage,
             }
         )
 

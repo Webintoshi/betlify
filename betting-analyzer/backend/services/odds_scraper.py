@@ -1,4 +1,4 @@
-
+﻿
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from ev_calculator import SUPPORTED_MARKETS
+from prediction_engine.config.markets import SUPPORTED_MARKETS
 from services.odds_api_io import OddsApiIo, get_client as get_odds_api_client
 
 logger = logging.getLogger("odds_scraper")

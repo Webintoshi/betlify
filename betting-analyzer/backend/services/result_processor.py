@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from supabase import Client
 from zoneinfo import ZoneInfo
 
-from ev_calculator import SUPPORTED_MARKETS
+from prediction_engine.config.markets import SUPPORTED_MARKETS
 from services.prediction_evaluator import evaluate_prediction
 from services.result_fetcher import ResultFetcher, get_service as get_result_fetcher_service
 

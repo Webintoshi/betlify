@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -38,6 +38,10 @@ class BettingScheduler:
         self.odds_scraper: OddsScraperService = get_odds_scraper_service()
         self.sofascore: Optional[SofaScoreService] = get_sofascore_service() if ENABLE_SOFASCORE_ENRICHMENT else None
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
+        self.match_analyzer: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
+
+    def set_match_analyzer(self, analyzer: Callable[..., Awaitable[Dict[str, Any]]]) -> None:
+        self.match_analyzer = analyzer
 
     def _today_and_tomorrow(self) -> List[str]:
         today = datetime.now(self.timezone).date()
@@ -662,6 +666,55 @@ class BettingScheduler:
         )
         return result
 
+    async def refresh_upcoming_engine_predictions(self) -> Dict[str, Any]:
+        if self.supabase is None or self.match_analyzer is None:
+            return {"processed_matches": 0, "updated_matches": 0, "skipped": True}
+
+        today = datetime.now(self.timezone).date().isoformat()
+        tomorrow = (datetime.now(self.timezone).date() + timedelta(days=1)).isoformat()
+        try:
+            rows = (
+                self.supabase.table("matches")
+                .select("id,status,match_date")
+                .gte("match_date", f"{today}T00:00:00")
+                .lte("match_date", f"{tomorrow}T23:59:59")
+                .in_("status", ["scheduled", "upcoming", "live", "notstarted", "ns"])
+                .order("match_date")
+                .limit(400)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            logger.exception("refresh_upcoming_engine_predictions: match query failed.")
+            return {"processed_matches": 0, "updated_matches": 0}
+
+        processed = 0
+        updated = 0
+        for row in rows:
+            match_id = str(row.get("id") or "").strip()
+            if not match_id:
+                continue
+            processed += 1
+            try:
+                await self.match_analyzer(
+                    match_id,
+                    confidence_threshold=58.0,
+                    include_details=False,
+                    refresh_live=False,
+                )
+                updated += 1
+            except Exception:
+                logger.exception("refresh_upcoming_engine_predictions failed. match_id=%s", match_id)
+            await asyncio.sleep(0.05)
+
+        logger.info(
+            "Prediction engine refresh tamamlandi. processed=%s updated=%s",
+            processed,
+            updated,
+        )
+        return {"processed_matches": processed, "updated_matches": updated}
+
     def configure(self) -> None:
         if self.scheduler.get_job("daily-fixtures"):
             return
@@ -765,6 +818,13 @@ class BettingScheduler:
             "interval",
             minutes=5,
             id="oddsapi-results-reconcile",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.refresh_upcoming_engine_predictions,
+            "interval",
+            minutes=30,
+            id="engine-recompute-upcoming",
             replace_existing=True,
         )
         self.scheduler.add_job(

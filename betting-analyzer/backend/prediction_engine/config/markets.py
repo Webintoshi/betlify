@@ -1,13 +1,4 @@
-from __future__ import annotations
-
-EXCLUDED_MARKETS = {
-    "IY_O0.5",
-    "IY_U0.5",
-    "IY_O1.5",
-    "IY_U1.5",
-    "IY_O2.5",
-    "IY_U2.5",
-}
+﻿from __future__ import annotations
 
 VALID_MARKETS = {
     "MS1": {"min_prob": 0.35, "max_prob": 0.80, "min_odd": 1.25, "max_odd": 4.50},
@@ -24,19 +15,31 @@ VALID_MARKETS = {
 }
 
 EV_THRESHOLDS = {
-    "MS1": {"min": 0.030, "max": 0.180},
-    "MSX": {"min": 0.035, "max": 0.220},
-    "MS2": {"min": 0.030, "max": 0.200},
-    "MS_O2.5": {"min": 0.025, "max": 0.150},
-    "MS_U2.5": {"min": 0.025, "max": 0.150},
-    "MS_O1.5": {"min": 0.020, "max": 0.120},
-    "KG_VAR": {"min": 0.030, "max": 0.180},
-    "KG_YOK": {"min": 0.030, "max": 0.180},
-    "IY1": {"min": 0.035, "max": 0.200},
-    "IYX": {"min": 0.040, "max": 0.220},
-    "IY2": {"min": 0.035, "max": 0.220},
+    "MS1": {"min": 0.05, "max": 0.18},
+    "MSX": {"min": 0.05, "max": 0.22},
+    "MS2": {"min": 0.05, "max": 0.20},
+    "MS_O2.5": {"min": 0.05, "max": 0.15},
+    "MS_U2.5": {"min": 0.05, "max": 0.15},
+    "MS_O1.5": {"min": 0.04, "max": 0.12},
+    "KG_VAR": {"min": 0.05, "max": 0.18},
+    "KG_YOK": {"min": 0.05, "max": 0.18},
+    "IY1": {"min": 0.05, "max": 0.20},
+    "IYX": {"min": 0.05, "max": 0.22},
+    "IY2": {"min": 0.05, "max": 0.22},
 }
 
-MIN_CONFIDENCE_SCORE = 55.0
-MIN_KELLY_PCT = 1.5
-FRACTIONAL_KELLY = 0.25
+MAX_DRIFT = {
+    "MS1": 0.15,
+    "MSX": 0.18,
+    "MS2": 0.15,
+    "MS_O2.5": 0.18,
+    "MS_U2.5": 0.18,
+    "MS_O1.5": 0.16,
+    "KG_VAR": 0.18,
+    "KG_YOK": 0.18,
+    "IY1": 0.18,
+    "IYX": 0.18,
+    "IY2": 0.18,
+}
+
+SUPPORTED_MARKETS = list(VALID_MARKETS.keys())

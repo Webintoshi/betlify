@@ -121,12 +121,8 @@ class BetfairParserTests(unittest.TestCase):
         self.assertIn("IY2", odds)
         self.assertIn("MS_O2.5", odds)
         self.assertIn("MS_U2.5", odds)
-        self.assertIn("IY_O0.5", odds)
-        self.assertIn("IY_U0.5", odds)
         self.assertIn("KG_VAR", odds)
         self.assertIn("KG_YOK", odds)
-        self.assertIn("HCP_-1", odds)
-        self.assertIn("HCP_+1", odds)
         self.assertEqual(rejects, {})
 
     def test_low_liquidity_rejected(self) -> None:
