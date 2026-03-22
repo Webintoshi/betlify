@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { getTeams, type TeamDirectoryItem } from "@/lib/api";
+import { TR, repairDisplayText } from "@/lib/tr-text";
 
 type TeamsPageProps = {
   searchParams?: Promise<{
@@ -21,32 +22,12 @@ function normalizeValue(value?: string | null): string {
   return String(value ?? "").trim();
 }
 
-function repairMojibakeText(value?: string | null): string {
-  const text = normalizeValue(value);
-  if (!text) {
-    return "";
-  }
-
-  const decodedEscapes = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
-    String.fromCharCode(Number.parseInt(hex, 16))
-  );
-  const baseText = decodedEscapes !== text ? decodedEscapes : text;
-
-  if (!/[ÃÄÅ]/.test(baseText)) {
-    return baseText;
-  }
-
-  try {
-    const bytes = Uint8Array.from(Array.from(baseText), (character) => character.charCodeAt(0) & 0xff);
-    const repaired = new TextDecoder("utf-8").decode(bytes).trim();
-    return repaired || baseText;
-  } catch {
-    return baseText;
-  }
+function t(value: string): string {
+  return repairDisplayText(value);
 }
 
 function normalizeLeagueKey(value?: string): string {
-  const compact = repairMojibakeText(value)
+  const compact = repairDisplayText(value)
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "")
@@ -99,15 +80,15 @@ const LEAGUE_PRIORITY_ORDER = [
 ];
 
 const LEAGUE_DISPLAY_LABELS: Record<string, string> = {
-  trendyolsuperlig: "Trendyol Süper Lig",
+  trendyolsuperlig: "Trendyol S\u00fcper Lig",
   premierleague: "Premier Lig",
   premierlig: "Premier Lig",
   laliga: "La Liga",
   seriea: "Serie A",
   bundesliga: "Bundesliga",
   ligue1: "Ligue 1",
-  uefachampionsleague: "Şampiyonlar Ligi",
-  sampiyonlarligi: "Şampiyonlar Ligi",
+  uefachampionsleague: "\u015eampiyonlar Ligi",
+  sampiyonlarligi: "\u015eampiyonlar Ligi",
   uefaeuropaleague: "Avrupa Ligi",
   avrupaligi: "Avrupa Ligi",
   uefaeuropaconferenceleague: "Konferans Ligi",
@@ -115,14 +96,14 @@ const LEAGUE_DISPLAY_LABELS: Record<string, string> = {
   championship: "Championship",
   eredivisie: "Eredivisie",
   primeiraliga: "Primeira Liga",
-  proleague: "Belçika Pro League",
-  scottishpremiership: "İskoçya Premiership",
-  superleaguegreece: "Yunanistan Süper Ligi",
+  proleague: "Bel\u00e7ika Pro League",
+  scottishpremiership: "\u0130sko\u00e7ya Premiership",
+  superleaguegreece: "Yunanistan S\u00fcper Ligi",
   trendyol1lig: "Trendyol 1. Lig",
   "2bundesliga": "2. Bundesliga",
   serieb: "Serie B",
   ligue2: "Ligue 2",
-  brasileiraobetano: "Brezilya Série A",
+  brasileiraobetano: "Brezilya S\u00e9rie A",
   mls: "MLS",
   saudiproleague: "Suudi Pro Lig",
   j1league: "J1 League",
@@ -135,11 +116,11 @@ function leaguePriorityIndex(value?: string): number {
 }
 
 function getLeagueDisplayLabel(value?: string): string {
-  const raw = repairMojibakeText(value);
+  const raw = repairDisplayText(value);
   if (!raw) {
-    return "Bilinmeyen Lig";
+    return t(TR.unknownLeague);
   }
-  return LEAGUE_DISPLAY_LABELS[normalizeLeagueKey(raw)] ?? raw;
+  return t(LEAGUE_DISPLAY_LABELS[normalizeLeagueKey(raw)] ?? raw);
 }
 
 function compareLeagueNames(left: string, right: string): number {
@@ -156,7 +137,7 @@ function buildLeagueOptions(items: TeamDirectoryItem[]): LeagueOption[] {
   const options: LeagueOption[] = [];
 
   for (const item of items) {
-    const raw = repairMojibakeText(item.league);
+    const raw = repairDisplayText(item.league);
     if (!raw) {
       continue;
     }
@@ -175,7 +156,7 @@ function buildLeagueOptions(items: TeamDirectoryItem[]): LeagueOption[] {
 }
 
 function buildCountryOptions(items: TeamDirectoryItem[]): string[] {
-  return Array.from(new Set(items.map((item) => repairMojibakeText(item.country)).filter(Boolean))).sort((a, b) =>
+  return Array.from(new Set(items.map((item) => repairDisplayText(item.country)).filter(Boolean))).sort((a, b) =>
     a.localeCompare(b, "tr")
   );
 }
@@ -193,7 +174,7 @@ function groupTeamsByLeague(items: TeamDirectoryItem[]): Array<[string, TeamDire
     .sort((left, right) => compareLeagueNames(left[0], right[0]))
     .map(([league, teams]) => [
       league,
-      [...teams].sort((left, right) => repairMojibakeText(left.name).localeCompare(repairMojibakeText(right.name), "tr"))
+      [...teams].sort((left, right) => repairDisplayText(left.name).localeCompare(repairDisplayText(right.name), "tr"))
     ]);
 }
 
@@ -202,7 +183,7 @@ function TeamLogo({ team }: { team: TeamDirectoryItem }) {
   if (!logoUrl) {
     return (
       <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-card-border bg-background-secondary text-sm font-black uppercase text-accent">
-        {repairMojibakeText(team.name).slice(0, 2) || "TA"}
+        {repairDisplayText(team.name).slice(0, 2) || "TA"}
       </div>
     );
   }
@@ -211,7 +192,7 @@ function TeamLogo({ team }: { team: TeamDirectoryItem }) {
     <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-card-border bg-background-secondary p-2">
       <img
         src={logoUrl}
-        alt={`${repairMojibakeText(team.name)} logosu`}
+        alt={`${repairDisplayText(team.name)} logosu`}
         className="h-full w-full object-contain"
         loading="lazy"
       />
@@ -220,13 +201,18 @@ function TeamLogo({ team }: { team: TeamDirectoryItem }) {
 }
 
 function TeamCard({ team }: { team: TeamDirectoryItem }) {
-  const coachName = repairMojibakeText(team.coach_name);
-  const teamName = repairMojibakeText(team.name);
-  const countryName = repairMojibakeText(team.country) || "Bilinmiyor";
+  const coachName = repairDisplayText(team.coach_name);
+  const teamName = repairDisplayText(team.name);
+  const countryName = repairDisplayText(team.country) || t(TR.unknown);
   const syncStatus = normalizeValue(team.profile_sync_status || "");
   const badgeVariant =
     syncStatus === "ready" ? "success" : syncStatus === "stale" ? "warning" : "neutral";
-  const statusLabel = syncStatus === "ready" ? "Hazır" : syncStatus === "stale" ? "Güncellenecek" : "Bekliyor";
+  const statusLabel =
+    syncStatus === "ready"
+      ? t(TR.statusReady)
+      : syncStatus === "stale"
+        ? t(TR.statusStale)
+        : t(TR.statusPending);
 
   return (
     <Card hover className="flex h-full flex-col gap-4 p-4">
@@ -246,16 +232,16 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
 
       <dl className="grid gap-3 text-xs">
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Takım</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">{t(TR.team)}</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{teamName}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Ülkesi</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">{t(TR.countryLabel)}</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{countryName}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Teknik Direktör</dt>
-          <dd className="mt-1 font-bold text-foreground-primary">{coachName || "Bilinmiyor"}</dd>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">{t(TR.coach)}</dt>
+          <dd className="mt-1 font-bold text-foreground-primary">{coachName || t(TR.unknown)}</dd>
         </div>
       </dl>
 
@@ -267,7 +253,7 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
           href={`/takimler/${team.id}`}
           className="inline-flex items-center gap-2 rounded-lg border border-accent px-3 py-2 text-xs font-black uppercase tracking-wide text-accent transition-colors duration-150 hover:bg-accent hover:text-white"
         >
-          Takım Detayı
+          {t(TR.teamDetail)}
         </Link>
       </div>
     </Card>
@@ -302,7 +288,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
       getTeams({ limit: 6000 })
     ]);
   } catch (error) {
-    fetchError = error instanceof Error ? error.message : "Takım verisi alınamadı";
+    fetchError = error instanceof Error ? error.message : t(TR.teamDataUnavailable);
   }
 
   const leagueOptions = buildLeagueOptions(allTeamsResponse.items ?? []);
@@ -315,28 +301,28 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
         <div>
           <div className="mb-2 flex items-center gap-3">
             <Badge variant="accent" size="sm">
-              SofaScore Cache
+              {t(TR.sofaScoreCache)}
             </Badge>
-            <p className="text-xs font-black uppercase tracking-[0.3em] text-accent">Betlify</p>
+            <p className="text-xs font-black uppercase tracking-[0.3em] text-accent">{t(TR.betlify)}</p>
           </div>
-          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">Takımlar</h1>
+          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">{t(TR.teams)}</h1>
           <p className="mt-1 text-sm font-bold uppercase tracking-wide text-foreground-muted">
-            Lig bazlı takım dizini, logo, ülke ve teknik direktör profili
+            {t(TR.teamsSubtitle)}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="neutral" size="md">
-            Toplam {teamsResponse.count} takım
+            {t(TR.totalTeams)} {teamsResponse.count} {t(TR.team).toLowerCase()}
           </Badge>
           {league ? (
             <Badge variant="success" size="md">
-              Lig: {league}
+              {t(TR.league)}: {repairDisplayText(league)}
             </Badge>
           ) : null}
           {country ? (
             <Badge variant="warning" size="md">
-              Ülke: {country}
+              {t(TR.country)}: {repairDisplayText(country)}
             </Badge>
           ) : null}
         </div>
@@ -349,18 +335,18 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
             </svg>
           </div>
-          <CardTitle>Takım Filtresi</CardTitle>
+          <CardTitle>{t(TR.teamFilter)}</CardTitle>
         </div>
 
         <form action="/takimler" className="grid gap-4 lg:grid-cols-4">
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Lig</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">{t(TR.league)}</label>
             <select
               name="league"
               defaultValue={league}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">Tüm Ligler</option>
+              <option value="">{t(TR.allLeagues)}</option>
               {leagueOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -370,13 +356,13 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Ülke</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">{t(TR.country)}</label>
             <select
               name="country"
               defaultValue={country}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">Tüm Ülkeler</option>
+              <option value="">{t(TR.allCountries)}</option>
               {countryOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -386,7 +372,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Takım Ara</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">{t(TR.teamSearch)}</label>
             <input
               type="text"
               name="q"
@@ -397,7 +383,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Limit</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">{t(TR.limit)}</label>
             <div className="flex gap-2">
               <input
                 type="number"
@@ -411,7 +397,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
                 type="submit"
                 className="rounded-lg border-2 border-accent bg-accent px-5 py-3 text-xs font-black uppercase tracking-wide text-white transition-colors duration-150 hover:bg-accent-secondary"
               >
-                Getir
+                {t(TR.get)}
               </button>
             </div>
           </div>
@@ -428,9 +414,9 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               </svg>
             </div>
             <div className="min-w-0">
-              <CardTitle className="text-sm">Takım verisi şu anda yüklenemedi</CardTitle>
+              <CardTitle className="text-sm">{t(TR.loadErrorTitle)}</CardTitle>
               <CardDescription className="mt-1 normal-case tracking-normal">
-                Backend bağlantısı veya ortam değişkeni hatası var. Ayrıntı: {fetchError}
+                {t(TR.loadErrorBodyPrefix)} {fetchError}
               </CardDescription>
             </div>
           </div>
@@ -447,10 +433,10 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
             </div>
             <div>
               <p className="text-sm font-black uppercase tracking-wide text-foreground-secondary">
-                Filtreye uygun takım bulunamadı
+                {t(TR.noTeamsTitle)}
               </p>
               <p className="mt-1 text-xs font-bold uppercase tracking-wide text-foreground-muted">
-                Lig veya ülke filtresini gevşetip tekrar deneyin
+                {t(TR.noTeamsBody)}
               </p>
             </div>
           </div>
@@ -462,7 +448,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <div className="flex flex-wrap items-center gap-3 border-b border-card-border pb-3">
                 <CardTitle className="text-base">{getLeagueDisplayLabel(leagueName)}</CardTitle>
                 <Badge variant="neutral" size="sm">
-                  {teams.length} takım
+                  {teams.length} {t(TR.team).toLowerCase()}
                 </Badge>
               </div>
 

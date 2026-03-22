@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { getTeam } from "@/lib/api";
+import { TR, repairDisplayText } from "@/lib/tr-text";
 
 type TeamDetailPageProps = {
   params: Promise<{
@@ -14,28 +15,8 @@ function normalizeValue(value?: string | null): string {
   return String(value ?? "").trim();
 }
 
-function repairMojibakeText(value?: string | null): string {
-  const text = normalizeValue(value);
-  if (!text) {
-    return "";
-  }
-
-  const decodedEscapes = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
-    String.fromCharCode(Number.parseInt(hex, 16))
-  );
-  const baseText = decodedEscapes !== text ? decodedEscapes : text;
-
-  if (!/[ÃÄÅ]/.test(baseText)) {
-    return baseText;
-  }
-
-  try {
-    const bytes = Uint8Array.from(Array.from(baseText), (character) => character.charCodeAt(0) & 0xff);
-    const repaired = new TextDecoder("utf-8").decode(bytes).trim();
-    return repaired || baseText;
-  } catch {
-    return baseText;
-  }
+function t(value: string): string {
+  return repairDisplayText(value);
 }
 
 function TeamLogo({ teamId, teamName }: { teamId: string; teamName: string }) {
@@ -61,12 +42,17 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
   }
 
   const team = response.team;
-  const teamName = repairMojibakeText(team.name);
-  const coachName = repairMojibakeText(team.coach_name) || "Bilinmiyor";
-  const leagueName = repairMojibakeText(team.league) || "Bilinmeyen Lig";
-  const countryName = repairMojibakeText(team.country) || "Bilinmiyor";
+  const teamName = repairDisplayText(team.name);
+  const coachName = repairDisplayText(team.coach_name) || t(TR.unknown);
+  const leagueName = repairDisplayText(team.league) || t(TR.unknownLeague);
+  const countryName = repairDisplayText(team.country) || t(TR.unknown);
   const syncStatus = normalizeValue(team.profile_sync_status);
-  const statusLabel = syncStatus === "ready" ? "Hazır" : syncStatus === "stale" ? "Güncellenecek" : "Bekliyor";
+  const statusLabel =
+    syncStatus === "ready"
+      ? t(TR.statusReady)
+      : syncStatus === "stale"
+        ? t(TR.statusStale)
+        : t(TR.statusPending);
   const badgeVariant = syncStatus === "ready" ? "success" : syncStatus === "stale" ? "warning" : "neutral";
 
   return (
@@ -77,7 +63,7 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
           <div>
             <div className="mb-3 flex flex-wrap items-center gap-3">
               <Badge variant="accent" size="sm">
-                Takım Profili
+                {t(TR.teamProfile)}
               </Badge>
               <Badge variant={badgeVariant} size="sm">
                 {statusLabel}
@@ -85,7 +71,7 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
             </div>
             <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">{teamName}</h1>
             <p className="mt-2 text-sm font-bold uppercase tracking-wide text-foreground-muted">
-              {leagueName} • {countryName}
+              {leagueName} - {countryName}
             </p>
           </div>
         </div>
@@ -94,34 +80,34 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
           href="/takimler"
           className="inline-flex items-center justify-center rounded-lg border border-card-border px-4 py-3 text-xs font-black uppercase tracking-wide text-foreground-secondary transition-colors duration-150 hover:border-accent hover:text-accent"
         >
-          Takımlara Dön
+          {t(TR.backToTeams)}
         </Link>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
         <Card className="space-y-5">
           <div className="border-b border-card-border pb-4">
-            <CardTitle>Genel Bilgiler</CardTitle>
+            <CardTitle>{t(TR.genericInfo)}</CardTitle>
             <CardDescription className="mt-2 normal-case tracking-normal">
-              Bu sayfa takım kartındaki temel bilgileri sistem içinden gösterir. Kullanıcıyı dış kaynağa göndermiyoruz.
+              {t(TR.genericInfoBody)}
             </CardDescription>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Takım</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.team)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{teamName}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Lig</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.league)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{leagueName}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Ülke</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.country)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{countryName}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Teknik Direktör</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.coach)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{coachName}</p>
             </div>
           </div>
@@ -129,24 +115,24 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
 
         <Card className="space-y-5">
           <div className="border-b border-card-border pb-4">
-            <CardTitle>Sistem Kaydı</CardTitle>
+            <CardTitle>{t(TR.systemRecord)}</CardTitle>
             <CardDescription className="mt-2 normal-case tracking-normal">
-              Takım verisi SofaScore cache katmanından alınıyor ve sistem içinde saklanıyor.
+              {t(TR.systemRecordBody)}
             </CardDescription>
           </div>
 
           <div className="grid gap-4">
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">SofaScore ID</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.sofaScoreId)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{team.sofascore_id ?? "-"}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Durum</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.status)}</p>
               <p className="mt-2 text-sm font-bold text-foreground-primary">{statusLabel}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
-              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Son Eşitleme</p>
-              <p className="mt-2 text-sm font-bold text-foreground-primary">{normalizeValue(team.profile_last_fetched_at) || "Henüz yok"}</p>
+              <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.lastSynced)}</p>
+              <p className="mt-2 text-sm font-bold text-foreground-primary">{normalizeValue(team.profile_last_fetched_at) || t(TR.notYet)}</p>
             </div>
           </div>
         </Card>
