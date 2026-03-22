@@ -16,6 +16,15 @@ const navItems = [
     )
   },
   {
+    href: "/takimler",
+    label: "Takimlar",
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5V10a2 2 0 00-.586-1.414l-7-7a2 2 0 00-2.828 0l-7 7A2 2 0 004 10v10h5m8 0v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6m10 0H7" />
+      </svg>
+    )
+  },
+  {
     href: "/coupon",
     label: "Kupon",
     icon: (

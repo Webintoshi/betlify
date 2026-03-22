@@ -434,6 +434,62 @@ class SofaScoreService:
         except Exception:
             return None
 
+    def _resolve_canonical_team_id(
+        self,
+        *,
+        team_name: str,
+        league_name: str,
+        country_name: str,
+        sofascore_team_id: int,
+    ) -> str:
+        resolved_by_sofascore = self._resolve_team_uuid_by_sofascore_id(sofascore_team_id)
+        if resolved_by_sofascore:
+            return resolved_by_sofascore
+        if self.supabase is None:
+            return stable_uuid("sofascore-team", sofascore_team_id)
+
+        normalized_name = _normalize_name(team_name)
+        normalized_league = str(league_name or "Unknown").strip()
+        normalized_country = str(country_name or "Unknown").strip()
+        select_columns = "id,name,league,country,created_at"
+        if self._has_column("teams", "sofascore_id"):
+            select_columns += ",sofascore_id"
+
+        candidates: List[Dict[str, Any]] = []
+        try:
+            result = (
+                self.supabase.table("teams")
+                .select(select_columns)
+                .eq("league", normalized_league)
+                .eq("country", normalized_country)
+                .limit(200)
+                .execute()
+            )
+            candidates = result.data or []
+        except Exception:
+            candidates = []
+
+        exact_candidates: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            if _normalize_name(candidate.get("name")) != normalized_name:
+                continue
+            exact_candidates.append(candidate)
+
+        if exact_candidates:
+            exact_candidates.sort(
+                key=lambda row: (
+                    0 if _safe_int(row.get("sofascore_id")) == sofascore_team_id and sofascore_team_id > 0 else 1,
+                    0 if _safe_int(row.get("sofascore_id")) > 0 else 1,
+                    str(row.get("created_at") or ""),
+                    str(row.get("id") or ""),
+                )
+            )
+            resolved = str(exact_candidates[0].get("id") or "").strip()
+            if resolved:
+                return resolved
+
+        return stable_uuid("sofascore-team", sofascore_team_id)
+
     def _get_cached_team_profile_row(
         self,
         *,
@@ -974,6 +1030,82 @@ class SofaScoreService:
         season_id = _safe_int(first.get("id"))
         return season_id if season_id > 0 else None
 
+    async def get_football_categories(self) -> List[Dict[str, Any]]:
+        payload = await self._request("/sport/football/categories", ttl_seconds=21600)
+        if payload is None:
+            return []
+        categories = payload.get("categories", []) if isinstance(payload, dict) else []
+        if not isinstance(categories, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for category in categories:
+            if not isinstance(category, dict):
+                continue
+            category_id = _safe_int(category.get("id"))
+            if category_id <= 0:
+                continue
+            normalized.append(
+                {
+                    "id": category_id,
+                    "name": str(category.get("name") or "").strip(),
+                    "slug": str(category.get("slug") or "").strip(),
+                    "priority": _safe_int(category.get("priority")),
+                    "flag": str(category.get("flag") or "").strip(),
+                    "alpha2": str(category.get("alpha2") or "").strip(),
+                }
+            )
+
+        normalized.sort(key=lambda row: (-_safe_int(row.get("priority")), str(row.get("name") or "")))
+        return normalized
+
+    async def get_category_unique_tournaments(self, category_id: int) -> List[Dict[str, Any]]:
+        if category_id <= 0:
+            return []
+        payload = await self._request(f"/category/{category_id}/unique-tournaments", ttl_seconds=21600)
+        if payload is None:
+            return []
+
+        groups = payload.get("groups", []) if isinstance(payload, dict) else []
+        if not isinstance(groups, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            tournaments = group.get("uniqueTournaments", [])
+            if not isinstance(tournaments, list):
+                continue
+            for tournament in tournaments:
+                if not isinstance(tournament, dict):
+                    continue
+                tournament_id = _safe_int(tournament.get("id"))
+                if tournament_id <= 0:
+                    continue
+                category = tournament.get("category", {}) if isinstance(tournament.get("category"), dict) else {}
+                normalized.append(
+                    {
+                        "id": tournament_id,
+                        "name": str(tournament.get("name") or "").strip(),
+                        "slug": str(tournament.get("slug") or "").strip(),
+                        "category_id": _safe_int(category.get("id")) or category_id,
+                        "category_name": str(category.get("name") or "").strip(),
+                        "user_count": _safe_int(tournament.get("userCount")),
+                    }
+                )
+
+        normalized.sort(key=lambda row: (-_safe_int(row.get("user_count")), str(row.get("name") or "")))
+        return normalized
+
+    async def _get_scheduled_events_payload(self, date: str) -> List[Dict[str, Any]]:
+        payload = await self._request(f"/sport/football/scheduled-events/{date}", ttl_seconds=600)
+        if payload is None:
+            return []
+
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        return events if isinstance(events, list) else []
+
     async def get_team_profile(self, team_id: int) -> Optional[Dict[str, Any]]:
         if team_id <= 0:
             return None
@@ -1047,8 +1179,8 @@ class SofaScoreService:
             "logo_url": profile.get("logo_url"),
         }
 
-    async def discover_teams_from_scheduled_events(self, date: str) -> List[Dict[str, Any]]:
-        events = await self.get_scheduled_events(date)
+    async def discover_teams_from_scheduled_events(self, date: str, *, tracked_only: bool = False) -> List[Dict[str, Any]]:
+        events = await self._get_scheduled_events_payload(date)
         if not isinstance(events, list):
             return []
         discovered: Dict[int, Dict[str, Any]] = {}
@@ -1057,8 +1189,11 @@ class SofaScoreService:
                 continue
             tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
             unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+            tournament_id = _safe_int(unique.get("id"))
             league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
             country_name = str(tournament.get("category", {}).get("name") or "Unknown") if isinstance(tournament.get("category"), dict) else "Unknown"
+            if tracked_only and not _is_tracked_tournament(tournament_id, league_name):
+                continue
             for side in ("homeTeam", "awayTeam"):
                 team_node = event.get(side, {}) if isinstance(event.get(side), dict) else {}
                 team_sofascore_id = _safe_int(team_node.get("id"))
@@ -1076,7 +1211,14 @@ class SofaScoreService:
                 }
         return list(discovered.values())
 
-    async def discover_teams_from_standings(self, tournament_id: int, season_id: int) -> List[Dict[str, Any]]:
+    async def discover_teams_from_standings(
+        self,
+        tournament_id: int,
+        season_id: int,
+        *,
+        league_name: str = "",
+        country_name: str = "",
+    ) -> List[Dict[str, Any]]:
         if tournament_id <= 0:
             return []
         resolved_season_id = season_id if season_id > 0 else (await self.get_latest_tournament_season_id(tournament_id) or 0)
@@ -1087,7 +1229,8 @@ class SofaScoreService:
         if not isinstance(rows, list):
             return []
 
-        league_name = SOFASCORE_TOURNAMENT_IDS.get(tournament_id, f"Tournament {tournament_id}")
+        resolved_league_name = league_name or SOFASCORE_TOURNAMENT_IDS.get(tournament_id, f"Tournament {tournament_id}")
+        resolved_country_name = country_name or "Unknown"
         discovered: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -1099,7 +1242,7 @@ class SofaScoreService:
                 "id": team_sofascore_id,
                 "name": row.get("team_name") or f"Team {team_sofascore_id}",
             }
-            team_uuid = self._ensure_team(team_payload, league_name, "Unknown")
+            team_uuid = self._ensure_team(team_payload, resolved_league_name, resolved_country_name)
             if not team_uuid:
                 continue
             discovered.append(
@@ -1107,12 +1250,46 @@ class SofaScoreService:
                     "team_id": team_uuid,
                     "team_sofascore_id": team_sofascore_id,
                     "team_name": str(row.get("team_name") or "").strip(),
-                    "league": league_name,
+                    "league": resolved_league_name,
+                    "country": resolved_country_name,
                     "season_id": resolved_season_id,
                     "tournament_id": tournament_id,
                 }
             )
         return discovered
+
+    async def discover_teams_from_category(
+        self,
+        category_id: int,
+        *,
+        category_name: str = "",
+        tournament_limit: int = 0,
+    ) -> List[Dict[str, Any]]:
+        tournaments = await self.get_category_unique_tournaments(category_id)
+        if not tournaments:
+            return []
+
+        discovered: Dict[int, Dict[str, Any]] = {}
+        processed_tournaments = 0
+        for tournament in tournaments:
+            tournament_id = _safe_int(tournament.get("id"))
+            if tournament_id <= 0:
+                continue
+            rows = await self.discover_teams_from_standings(
+                tournament_id,
+                0,
+                league_name=str(tournament.get("name") or ""),
+                country_name=str(tournament.get("category_name") or category_name or "Unknown"),
+            )
+            for row in rows:
+                team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+                if team_sofascore_id > 0:
+                    discovered[team_sofascore_id] = row
+            processed_tournaments += 1
+            if tournament_limit > 0 and processed_tournaments >= int(tournament_limit):
+                break
+
+        return list(discovered.values())
 
     async def discover_all_tracked_teams(self) -> Dict[str, Any]:
         if self.supabase is None:
@@ -1123,7 +1300,7 @@ class SofaScoreService:
 
         today = datetime.now(timezone.utc).date()
         for date_str in [today.isoformat(), (today + timedelta(days=1)).isoformat()]:
-            rows = await self.discover_teams_from_scheduled_events(date_str)
+            rows = await self.discover_teams_from_scheduled_events(date_str, tracked_only=True)
             source_breakdown[f"scheduled:{date_str}"] = len(rows)
             for row in rows:
                 team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
@@ -1131,7 +1308,11 @@ class SofaScoreService:
                     unique_rows[team_sofascore_id] = row
 
         for tournament_id in sorted(SOFASCORE_TOURNAMENT_IDS.keys()):
-            rows = await self.discover_teams_from_standings(tournament_id, 0)
+            rows = await self.discover_teams_from_standings(
+                tournament_id,
+                0,
+                league_name=SOFASCORE_TOURNAMENT_IDS.get(tournament_id, f"Tournament {tournament_id}"),
+            )
             source_breakdown[f"standings:{tournament_id}"] = len(rows)
             for row in rows:
                 team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
@@ -1142,6 +1323,70 @@ class SofaScoreService:
             "processed": len(unique_rows),
             "discovered": len(unique_rows),
             "source_breakdown": source_breakdown,
+            "teams": list(unique_rows.values()),
+        }
+
+    async def discover_all_football_teams(
+        self,
+        *,
+        history_days: int = 90,
+        future_days: int = 1,
+        include_categories: bool = True,
+        include_history: bool = True,
+        category_limit: int = 0,
+        tournament_limit: int = 0,
+    ) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed": 0, "discovered": 0, "source_breakdown": {}, "reason": "supabase_unavailable"}
+
+        unique_rows: Dict[int, Dict[str, Any]] = {}
+        source_breakdown: Dict[str, int] = {}
+
+        processed_categories = 0
+        if include_categories:
+            categories = await self.get_football_categories()
+            for category in categories:
+                category_id = _safe_int(category.get("id"))
+                if category_id <= 0:
+                    continue
+                rows = await self.discover_teams_from_category(
+                    category_id,
+                    category_name=str(category.get("name") or ""),
+                    tournament_limit=tournament_limit,
+                )
+                source_breakdown[f"category:{category_id}:{category.get('name') or 'Unknown'}"] = len(rows)
+                for row in rows:
+                    team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+                    if team_sofascore_id > 0:
+                        unique_rows[team_sofascore_id] = row
+                processed_categories += 1
+                if category_limit > 0 and processed_categories >= int(category_limit):
+                    break
+
+        if include_history:
+            today = datetime.now(timezone.utc).date()
+            start_date = today - timedelta(days=max(0, int(history_days)))
+            end_date = today + timedelta(days=max(0, int(future_days)))
+            current = start_date
+            while current <= end_date:
+                date_str = current.isoformat()
+                rows = await self.discover_teams_from_scheduled_events(date_str, tracked_only=False)
+                source_breakdown[f"scheduled:{date_str}"] = len(rows)
+                for row in rows:
+                    team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+                    if team_sofascore_id > 0:
+                        unique_rows[team_sofascore_id] = row
+                current += timedelta(days=1)
+
+        return {
+            "processed": len(unique_rows),
+            "discovered": len(unique_rows),
+            "source_breakdown": source_breakdown,
+            "categories_processed": processed_categories,
+            "history_days": max(0, int(history_days)),
+            "future_days": max(0, int(future_days)),
+            "include_categories": bool(include_categories),
+            "include_history": bool(include_history),
             "teams": list(unique_rows.values()),
         }
 
@@ -1436,14 +1681,22 @@ class SofaScoreService:
         if sofascore_team_id <= 0:
             return None
 
-        team_uuid = stable_uuid("sofascore-team", sofascore_team_id)
+        team_name = str(team_payload.get("name") or f"Team {sofascore_team_id}").strip()
+        resolved_league_name = str(league_name or "Unknown").strip() or "Unknown"
+        resolved_country_name = str(country_name or "Unknown").strip() or "Unknown"
+        team_uuid = self._resolve_canonical_team_id(
+            team_name=team_name,
+            league_name=resolved_league_name,
+            country_name=resolved_country_name,
+            sofascore_team_id=sofascore_team_id,
+        )
         has_sofascore_column = self._has_column("teams", "sofascore_id")
         slug = str(team_payload.get("slug") or "").strip()
         record = {
             "id": team_uuid,
-            "name": team_payload.get("name", f"Team {sofascore_team_id}"),
-            "league": league_name or "Unknown",
-            "country": country_name or "Unknown",
+            "name": team_name,
+            "league": resolved_league_name,
+            "country": resolved_country_name,
             "market_value": 0,
         }
         if has_sofascore_column:
@@ -1469,10 +1722,7 @@ class SofaScoreService:
         if self._has_column("teams", "sofascore_last_synced_at"):
             record["sofascore_last_synced_at"] = datetime.now(timezone.utc).isoformat()
         try:
-            if has_sofascore_column:
-                self.supabase.table("teams").upsert(record, on_conflict="sofascore_id").execute()
-            else:
-                self.supabase.table("teams").upsert(record, on_conflict="id").execute()
+            self.supabase.table("teams").upsert(record, on_conflict="id").execute()
             return team_uuid
         except Exception:
             try:
@@ -1483,11 +1733,7 @@ class SofaScoreService:
                 return None
 
     async def get_scheduled_events(self, date: str) -> Optional[List[Dict[str, Any]]]:
-        payload = await self._request(f"/sport/football/scheduled-events/{date}", ttl_seconds=600)
-        if payload is None:
-            return None
-
-        events = payload.get("events", []) if isinstance(payload, dict) else []
+        events = await self._get_scheduled_events_payload(date)
         if not isinstance(events, list):
             return []
         saved_events: List[Dict[str, Any]] = []
@@ -3180,12 +3426,50 @@ async def sync_team_profile(team_id: str, sofascore_team_id: int, force: bool = 
     return await _default_service.sync_team_profile(team_id, sofascore_team_id, force=force)
 
 
-async def discover_teams_from_scheduled_events(date: str) -> List[Dict[str, Any]]:
-    return await _default_service.discover_teams_from_scheduled_events(date)
+async def get_football_categories() -> List[Dict[str, Any]]:
+    return await _default_service.get_football_categories()
 
 
-async def discover_teams_from_standings(tournament_id: int, season_id: int) -> List[Dict[str, Any]]:
-    return await _default_service.discover_teams_from_standings(tournament_id, season_id)
+async def get_category_unique_tournaments(category_id: int) -> List[Dict[str, Any]]:
+    return await _default_service.get_category_unique_tournaments(category_id)
+
+
+async def discover_teams_from_scheduled_events(date: str, *, tracked_only: bool = False) -> List[Dict[str, Any]]:
+    return await _default_service.discover_teams_from_scheduled_events(date, tracked_only=tracked_only)
+
+
+async def discover_teams_from_standings(
+    tournament_id: int,
+    season_id: int,
+    *,
+    league_name: str = "",
+    country_name: str = "",
+) -> List[Dict[str, Any]]:
+    return await _default_service.discover_teams_from_standings(
+        tournament_id,
+        season_id,
+        league_name=league_name,
+        country_name=country_name,
+    )
+
+
+async def discover_all_football_teams(
+    *,
+    history_days: int = 90,
+    future_days: int = 1,
+    include_categories: bool = True,
+    include_history: bool = True,
+    category_limit: int = 0,
+    tournament_limit: int = 0,
+) -> Dict[str, Any]:
+    return await _default_service.discover_all_football_teams(
+        history_days=history_days,
+        future_days=future_days,
+        include_categories=include_categories,
+        include_history=include_history,
+        category_limit=category_limit,
+        tournament_limit=tournament_limit,
+    )
 
 
 async def populate_team_stats_from_history(team_id: str, sofascore_team_id: int) -> Optional[Dict[str, Any]]:

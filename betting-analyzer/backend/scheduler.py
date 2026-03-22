@@ -39,6 +39,7 @@ class BettingScheduler:
         self.sofascore: Optional[SofaScoreService] = get_sofascore_service() if ENABLE_SOFASCORE_ENRICHMENT else None
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
         self.match_analyzer: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
+        self.team_profile_refresh_lock = asyncio.Lock()
 
     def set_match_analyzer(self, analyzer: Callable[..., Awaitable[Dict[str, Any]]]) -> None:
         self.match_analyzer = analyzer
@@ -344,27 +345,56 @@ class BettingScheduler:
         )
         return result
 
-    async def discover_sofascore_teams(self) -> Dict[str, Any]:
+    async def discover_sofascore_teams(
+        self,
+        *,
+        scope: str = "tracked",
+        history_days: int = 30,
+        future_days: int = 1,
+        include_categories: bool = True,
+        include_history: bool = True,
+        category_limit: int = 0,
+        tournament_limit: int = 0,
+    ) -> Dict[str, Any]:
         if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
             return {"processed": 0, "discovered": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
-        result = await self.sofascore.discover_all_tracked_teams()
+        normalized_scope = str(scope or "tracked").strip().lower()
+        if normalized_scope == "global":
+            result = await self.sofascore.discover_all_football_teams(
+                history_days=history_days,
+                future_days=future_days,
+                include_categories=include_categories,
+                include_history=include_history,
+                category_limit=category_limit,
+                tournament_limit=tournament_limit,
+            )
+        else:
+            result = await self.sofascore.discover_all_tracked_teams()
         logger.info(
-            "Sofascore team discovery tamamlandi. processed=%s discovered=%s",
+            "Sofascore team discovery tamamlandi. scope=%s processed=%s discovered=%s",
+            normalized_scope,
             result.get("processed", 0),
             result.get("discovered", 0),
         )
-        return result
+        return {"scope": normalized_scope, **result}
 
     async def refresh_sofascore_team_profiles(self, force: bool = False, limit: int = 0) -> Dict[str, Any]:
         if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
             return {"processed": 0, "updated": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
-        result = await self.sofascore.refresh_team_profiles(force=force, limit=limit)
+        async with self.team_profile_refresh_lock:
+            result = await self.sofascore.refresh_team_profiles(force=force, limit=limit)
         logger.info(
             "Sofascore team profile gorevi tamamlandi. processed=%s updated=%s failed=%s",
             result.get("processed", 0),
             result.get("updated", 0),
             result.get("failed", 0),
         )
+        return result
+
+    async def refresh_sofascore_team_profiles_chunked(self, chunk_size: int = 200) -> Dict[str, Any]:
+        normalized_chunk_size = max(1, min(int(chunk_size or 200), 1000))
+        result = await self.refresh_sofascore_team_profiles(force=False, limit=normalized_chunk_size)
+        result["chunk_size"] = normalized_chunk_size
         return result
 
     async def populate_today_team_stats_history(self) -> Dict[str, Any]:
@@ -840,10 +870,11 @@ class BettingScheduler:
                 replace_existing=True,
             )
             self.scheduler.add_job(
-                self.refresh_sofascore_team_profiles,
+                self.refresh_sofascore_team_profiles_chunked,
                 "interval",
-                hours=6,
-                id="sofascore-team-profiles-6h",
+                minutes=15,
+                kwargs={"chunk_size": 200},
+                id="sofascore-team-profiles-batch-15m",
                 replace_existing=True,
             )
             self.scheduler.add_job(

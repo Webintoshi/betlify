@@ -86,6 +86,23 @@ backtest_state: Dict[str, Any] = {
     "rows": [],
     "last_error": None,
 }
+team_profile_backfill_task: Optional[asyncio.Task[Any]] = None
+team_profile_backfill_state: Dict[str, Any] = {
+    "status": "idle",
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "chunk_size": 0,
+    "max_chunks": 0,
+    "force": False,
+    "chunks_completed": 0,
+    "processed": 0,
+    "updated": 0,
+    "failed": 0,
+    "pending_remaining": None,
+    "last_result": None,
+    "last_error": None,
+}
 
 
 @asynccontextmanager
@@ -190,6 +207,92 @@ def _load_team_profile_cache_map(client: Client, team_ids: List[str]) -> Dict[st
         for row in rows
         if isinstance(row, dict) and str(row.get("team_id") or "")
     }
+
+
+def _count_pending_team_profiles(client: Client) -> int:
+    try:
+        result = (
+            client.table("teams")
+            .select("id", count="exact")
+            .not_.is_("sofascore_id", "null")
+            .in_("profile_sync_status", ["pending", "stale"])
+            .limit(1)
+            .execute()
+        )
+        return int(result.count or 0)
+    except Exception:
+        return 0
+
+
+async def _run_team_profile_backfill(
+    *,
+    chunk_size: int,
+    max_chunks: int,
+    force: bool,
+) -> None:
+    team_profile_backfill_state.update(
+        {
+            "status": "running",
+            "running": True,
+            "started_at": datetime.now(scheduler.timezone).isoformat(),
+            "finished_at": None,
+            "chunk_size": chunk_size,
+            "max_chunks": max_chunks,
+            "force": bool(force),
+            "chunks_completed": 0,
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "pending_remaining": None,
+            "last_result": None,
+            "last_error": None,
+        }
+    )
+
+    try:
+        client = get_supabase_client()
+        total_chunks = max(0, int(max_chunks))
+        normalized_chunk = max(1, min(int(chunk_size), 1000))
+
+        while True:
+            if total_chunks > 0 and int(team_profile_backfill_state.get("chunks_completed") or 0) >= total_chunks:
+                break
+
+            result = await scheduler.refresh_sofascore_team_profiles(force=force, limit=normalized_chunk)
+            processed = int(result.get("processed", 0) or 0)
+            updated = int(result.get("updated", 0) or 0)
+            failed = int(result.get("failed", 0) or 0)
+
+            if processed <= 0:
+                team_profile_backfill_state["last_result"] = result
+                team_profile_backfill_state["pending_remaining"] = _count_pending_team_profiles(client)
+                break
+
+            team_profile_backfill_state["chunks_completed"] = int(team_profile_backfill_state.get("chunks_completed") or 0) + 1
+            team_profile_backfill_state["processed"] = int(team_profile_backfill_state.get("processed") or 0) + processed
+            team_profile_backfill_state["updated"] = int(team_profile_backfill_state.get("updated") or 0) + updated
+            team_profile_backfill_state["failed"] = int(team_profile_backfill_state.get("failed") or 0) + failed
+            team_profile_backfill_state["pending_remaining"] = _count_pending_team_profiles(client)
+            team_profile_backfill_state["last_result"] = result
+            await asyncio.sleep(1)
+
+        team_profile_backfill_state.update(
+            {
+                "status": "completed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.exception("Team profile backfill failed.")
+        team_profile_backfill_state.update(
+            {
+                "status": "failed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "last_error": str(exc),
+            }
+        )
 
 
 async def _run_full_backfill() -> None:
@@ -3080,6 +3183,7 @@ async def admin_stats() -> Dict[str, Any]:
     backfill_running = backfill_task is not None and not backfill_task.done()
     reset_running = reset_refetch_task is not None and not reset_refetch_task.done()
     backtest_running = backtest_task is not None and not backtest_task.done()
+    team_profile_running = team_profile_backfill_task is not None and not team_profile_backfill_task.done()
     return {
         "backfill": {
             "status": backfill_state.get("status"),
@@ -3114,6 +3218,21 @@ async def admin_stats() -> Dict[str, Any]:
             "skipped_no_market": backtest_state.get("skipped_no_market"),
             "summary": backtest_state.get("summary"),
             "last_error": backtest_state.get("last_error"),
+        },
+        "team_profile_backfill": {
+            "status": team_profile_backfill_state.get("status"),
+            "running": team_profile_backfill_state.get("running") or team_profile_running,
+            "started_at": team_profile_backfill_state.get("started_at"),
+            "finished_at": team_profile_backfill_state.get("finished_at"),
+            "chunk_size": team_profile_backfill_state.get("chunk_size"),
+            "max_chunks": team_profile_backfill_state.get("max_chunks"),
+            "force": team_profile_backfill_state.get("force"),
+            "chunks_completed": team_profile_backfill_state.get("chunks_completed"),
+            "processed": team_profile_backfill_state.get("processed"),
+            "updated": team_profile_backfill_state.get("updated"),
+            "failed": team_profile_backfill_state.get("failed"),
+            "pending_remaining": team_profile_backfill_state.get("pending_remaining"),
+            "last_error": team_profile_backfill_state.get("last_error"),
         },
     }
 
@@ -3577,10 +3696,29 @@ async def admin_sync_team_logos(
 
 
 @app.post("/admin/sync/teams/discover")
-async def admin_discover_teams() -> Dict[str, Any]:
+async def admin_discover_teams(
+    scope: str = Query(default="tracked"),
+    history_days: int = Query(default=30, ge=0, le=365),
+    future_days: int = Query(default=1, ge=0, le=30),
+    include_categories: bool = Query(default=True),
+    include_history: bool = Query(default=True),
+    category_limit: int = Query(default=0, ge=0, le=300),
+    tournament_limit: int = Query(default=0, ge=0, le=5000),
+) -> Dict[str, Any]:
     if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
         raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
-    result = await scheduler.discover_sofascore_teams()
+    normalized_scope = str(scope or "tracked").strip().lower()
+    if normalized_scope not in {"tracked", "global"}:
+        raise HTTPException(status_code=400, detail="scope sadece 'tracked' veya 'global' olabilir.")
+    result = await scheduler.discover_sofascore_teams(
+        scope=normalized_scope,
+        history_days=history_days,
+        future_days=future_days,
+        include_categories=include_categories,
+        include_history=include_history,
+        category_limit=category_limit,
+        tournament_limit=tournament_limit,
+    )
     return {"status": "ok", **result}
 
 
@@ -3593,6 +3731,62 @@ async def admin_sync_team_profiles(
         raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
     result = await scheduler.refresh_sofascore_team_profiles(force=force, limit=limit)
     return {"status": "ok", **result}
+
+
+@app.post("/admin/sync/teams/profiles/backfill")
+async def admin_start_team_profile_backfill(
+    chunk_size: int = Query(default=200, ge=1, le=1000),
+    max_chunks: int = Query(default=0, ge=0, le=1000),
+    force: bool = Query(default=False),
+) -> Dict[str, Any]:
+    global team_profile_backfill_task
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    if team_profile_backfill_task is not None and not team_profile_backfill_task.done():
+        return {
+            "status": "running",
+            "message": "Team profile backfill zaten calisiyor",
+            "state": team_profile_backfill_state,
+        }
+
+    team_profile_backfill_task = asyncio.create_task(
+        _run_team_profile_backfill(
+            chunk_size=int(chunk_size),
+            max_chunks=int(max_chunks),
+            force=bool(force),
+        )
+    )
+    return {
+        "status": "started",
+        "message": "Team profile backfill arka planda basladi",
+        "chunk_size": int(chunk_size),
+        "max_chunks": int(max_chunks),
+        "force": bool(force),
+    }
+
+
+@app.get("/admin/sync/teams/profiles/backfill/status")
+async def admin_team_profile_backfill_status() -> Dict[str, Any]:
+    running = team_profile_backfill_task is not None and not team_profile_backfill_task.done()
+    return {
+        "status": "ok",
+        "backfill": {
+            "status": team_profile_backfill_state.get("status"),
+            "running": bool(team_profile_backfill_state.get("running")) or running,
+            "started_at": team_profile_backfill_state.get("started_at"),
+            "finished_at": team_profile_backfill_state.get("finished_at"),
+            "chunk_size": team_profile_backfill_state.get("chunk_size"),
+            "max_chunks": team_profile_backfill_state.get("max_chunks"),
+            "force": team_profile_backfill_state.get("force"),
+            "chunks_completed": team_profile_backfill_state.get("chunks_completed"),
+            "processed": team_profile_backfill_state.get("processed"),
+            "updated": team_profile_backfill_state.get("updated"),
+            "failed": team_profile_backfill_state.get("failed"),
+            "pending_remaining": team_profile_backfill_state.get("pending_remaining"),
+            "last_result": team_profile_backfill_state.get("last_result"),
+            "last_error": team_profile_backfill_state.get("last_error"),
+        },
+    }
 
 
 @app.get("/admin/sync/teams/status")
@@ -3654,6 +3848,16 @@ async def admin_team_sync_status() -> Dict[str, Any]:
         "missing_coach_count": missing_coach,
         "stale_profile_count": stale_profiles,
         "pending_profile_count": pending_profiles,
+        "profile_backfill": {
+            "status": team_profile_backfill_state.get("status"),
+            "running": bool(team_profile_backfill_state.get("running")) or (team_profile_backfill_task is not None and not team_profile_backfill_task.done()),
+            "chunk_size": team_profile_backfill_state.get("chunk_size"),
+            "chunks_completed": team_profile_backfill_state.get("chunks_completed"),
+            "processed": team_profile_backfill_state.get("processed"),
+            "updated": team_profile_backfill_state.get("updated"),
+            "failed": team_profile_backfill_state.get("failed"),
+            "pending_remaining": team_profile_backfill_state.get("pending_remaining"),
+        },
         "scheduler": scheduler.scheduler_status(),
     }
 

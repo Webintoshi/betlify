@@ -258,6 +258,23 @@ export type MatchAnalysisResponse = {
   };
 };
 
+export type TeamDirectoryItem = {
+  id: string;
+  name: string;
+  league: string;
+  country: string;
+  logo_url?: string | null;
+  coach_name?: string | null;
+  sofascore_id?: number | null;
+  sofascore_team_url?: string | null;
+  profile_sync_status?: string | null;
+};
+
+export type TeamsResponse = {
+  count: number;
+  items: TeamDirectoryItem[];
+};
+
 export type CouponSelectionPayload = {
   match_id: string;
   home_team: string;
@@ -405,6 +422,33 @@ export async function getHistory(params?: {
 
 export async function getHealth(): Promise<HealthResponse> {
   return fetchJson<HealthResponse>("/health");
+}
+
+export async function getTeams(params?: {
+  league?: string;
+  country?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<TeamsResponse> {
+  const search = new URLSearchParams();
+  if (params?.league) {
+    search.set("league", params.league);
+  }
+  if (params?.country) {
+    search.set("country", params.country);
+  }
+  if (params?.q) {
+    search.set("q", params.q);
+  }
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.offset === "number") {
+    search.set("offset", String(params.offset));
+  }
+  const query = search.toString();
+  return fetchJson<TeamsResponse>(`/teams${query ? `?${query}` : ""}`);
 }
 
 export async function createCoupon(selections: CouponSelectionPayload[]): Promise<{

@@ -17,6 +17,7 @@ from config import DEFAULT_SEASON, TRACKED_LEAGUE_IDS, TRACKED_LEAGUES
 logger = logging.getLogger(__name__)
 
 API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
+CALENDAR_YEAR_LEAGUE_IDS = {4, 5, 6, 960}
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
@@ -27,6 +28,10 @@ def stable_uuid(resource_prefix: str, external_id: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"{resource_prefix}-{external_id}"))
 
 
+def _normalize_name(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+
+
 def map_fixture_status(raw_status: str) -> str:
     normalized = (raw_status or "").upper()
     if normalized in {"FT", "AET", "PEN", "CANC", "PST"}:
@@ -34,6 +39,32 @@ def map_fixture_status(raw_status: str) -> str:
     if normalized in {"1H", "2H", "HT", "LIVE", "ET"}:
         return "live"
     return "scheduled"
+
+
+def resolve_season_for_date(date_value: str, league_id: Optional[int] = None, default: int = DEFAULT_SEASON) -> int:
+    text = str(date_value or "").strip()
+    if not text:
+        return int(default)
+
+    normalized = text.replace("Z", "+00:00")
+    parsed: Optional[datetime] = None
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            parsed = None
+
+    if parsed is None:
+        return int(default)
+
+    league = int(league_id or 0)
+    if league in CALENDAR_YEAR_LEAGUE_IDS:
+        return int(parsed.year)
+
+    # Avrupa formati sezonu: Temmuz-Haziran -> mart 2026 = 2025 sezonu.
+    return int(parsed.year if parsed.month >= 7 else parsed.year - 1)
 
 
 def _parse_percent(value: Any) -> float:
@@ -87,6 +118,68 @@ class ApiFootballService:
             return float(value)
         except (TypeError, ValueError):
             return fallback
+
+    def _resolve_team_uuid_by_api_team_id(self, api_team_id: int) -> Optional[str]:
+        if self.supabase is None or api_team_id <= 0:
+            return None
+        try:
+            result = (
+                self.supabase.table("teams")
+                .select("id")
+                .eq("api_team_id", api_team_id)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if not rows:
+                return None
+            return str(rows[0].get("id") or "") or None
+        except Exception:
+            return None
+
+    def _resolve_canonical_team_id(
+        self,
+        *,
+        team_name: str,
+        league_name: str,
+        country_name: str,
+        api_team_id: int,
+    ) -> str:
+        resolved_by_api = self._resolve_team_uuid_by_api_team_id(api_team_id)
+        if resolved_by_api:
+            return resolved_by_api
+        if self.supabase is None:
+            return stable_uuid("api-football-team", api_team_id)
+
+        normalized_name = _normalize_name(team_name)
+        candidates: List[Dict[str, Any]] = []
+        try:
+            result = (
+                self.supabase.table("teams")
+                .select("id,name,league,country,created_at,api_team_id")
+                .eq("league", str(league_name or "Unknown").strip() or "Unknown")
+                .eq("country", str(country_name or "Unknown").strip() or "Unknown")
+                .limit(200)
+                .execute()
+            )
+            candidates = result.data or []
+        except Exception:
+            candidates = []
+
+        exact_candidates = [row for row in candidates if _normalize_name(row.get("name")) == normalized_name]
+        if exact_candidates:
+            exact_candidates.sort(
+                key=lambda row: (
+                    0 if self._safe_int(row.get("api_team_id")) == api_team_id and api_team_id > 0 else 1,
+                    str(row.get("created_at") or ""),
+                    str(row.get("id") or ""),
+                )
+            )
+            resolved = str(exact_candidates[0].get("id") or "").strip()
+            if resolved:
+                return resolved
+
+        return stable_uuid("api-football-team", api_team_id)
 
     def _quota_available(self) -> bool:
         if self.requests_remaining is not None and self.requests_remaining < 10:
@@ -206,17 +299,25 @@ class ApiFootballService:
         if api_team_id <= 0:
             return None
 
-        team_uuid = stable_uuid("api-football-team", api_team_id)
+        team_name = str(team_payload.get("name") or f"Team {api_team_id}").strip()
+        resolved_league_name = str(league_name or "Unknown").strip() or "Unknown"
+        resolved_country_name = str(country_name or "Unknown").strip() or "Unknown"
+        team_uuid = self._resolve_canonical_team_id(
+            team_name=team_name,
+            league_name=resolved_league_name,
+            country_name=resolved_country_name,
+            api_team_id=api_team_id,
+        )
         record = {
             "id": team_uuid,
             "api_team_id": api_team_id,
-            "name": team_payload.get("name", f"Team {api_team_id}"),
-            "league": league_name or "Unknown",
-            "country": country_name or "Unknown",
+            "name": team_name,
+            "league": resolved_league_name,
+            "country": resolved_country_name,
             "market_value": 0,
         }
         try:
-            self.supabase.table("teams").upsert(record, on_conflict="api_team_id").execute()
+            self.supabase.table("teams").upsert(record, on_conflict="id").execute()
             return team_uuid
         except Exception:
             try:
@@ -276,7 +377,16 @@ class ApiFootballService:
             "league": league.get("name", f"League {league.get('id', '')}"),
             "match_date": fixture.get("date"),
             "status": map_fixture_status(fixture.get("status", {}).get("short", "")),
-            "season": str(league.get("season", DEFAULT_SEASON)),
+            "season": str(
+                league.get(
+                    "season",
+                    resolve_season_for_date(
+                        str(fixture.get("date") or ""),
+                        self._safe_int(league.get("id"), 0),
+                        default=DEFAULT_SEASON,
+                    ),
+                )
+            ),
             "ht_home": self._safe_int(halftime.get("home")),
             "ht_away": self._safe_int(halftime.get("away")),
             "ft_home": self._safe_int(fulltime.get("home")),
@@ -292,9 +402,10 @@ class ApiFootballService:
         updated_count = 0
 
         for league_id in TRACKED_LEAGUE_IDS:
+            season = resolve_season_for_date(date, league_id, default=DEFAULT_SEASON)
             payload = await self._request(
                 "/fixtures",
-                {"date": date, "league": league_id, "season": DEFAULT_SEASON},
+                {"date": date, "league": league_id, "season": season},
                 ttl_seconds=1800,
             )
             if payload is None:
@@ -318,10 +429,11 @@ class ApiFootballService:
                     logger.exception("Match save failed. api_match_id=%s", record.get("api_match_id"))
 
         logger.info(
-            "%s mac cekildi, inserted=%s updated=%s, kalan istek: %s",
+            "%s mac cekildi, inserted=%s updated=%s, tarih=%s kalan istek: %s",
             len(processed),
             inserted_count,
             updated_count,
+            date,
             self.requests_remaining,
         )
         return processed
