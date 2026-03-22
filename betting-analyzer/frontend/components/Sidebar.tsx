@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -55,6 +56,16 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [lastUpdated, setLastUpdated] = useState<string>("--:--");
+
+  useEffect(() => {
+    const formatter = new Intl.DateTimeFormat("tr-TR", { hour: "2-digit", minute: "2-digit" });
+    const updateClock = () => setLastUpdated(formatter.format(new Date()));
+
+    updateClock();
+    const intervalId = window.setInterval(updateClock, 60_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   return (
     <>
@@ -121,7 +132,7 @@ export function Sidebar() {
               <span className="text-xs font-bold text-success uppercase tracking-wide">Sistem Aktif</span>
             </div>
             <p className="text-[10px] font-medium text-foreground-muted">
-              Son guncelleme: {new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+              Son guncelleme: {lastUpdated}
             </p>
           </div>
         </div>
