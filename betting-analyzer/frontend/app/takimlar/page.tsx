@@ -47,7 +47,7 @@ function groupTeamsByLeague(items: TeamDirectoryItem[]): Array<[string, TeamDire
 }
 
 function TeamLogo({ team }: { team: TeamDirectoryItem }) {
-  const logoUrl = normalizeValue(team.logo_url || "");
+  const logoUrl = team.id ? `/api/backend/teams/${team.id}/logo` : normalizeValue(team.logo_url || "");
   if (!logoUrl) {
     return (
       <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-card-border bg-background-secondary text-sm font-black uppercase text-accent">

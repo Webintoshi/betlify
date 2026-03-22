@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
@@ -4213,6 +4213,43 @@ async def update_settings(_: SettingsUpdateRequest) -> Dict[str, Any]:
     return {"status": "ok"}
 
 
+def _repair_mojibake_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "Ã" not in text and "Ä" not in text:
+        return text
+    for encoding in ("latin1", "cp1254", "cp1252"):
+        try:
+            repaired = text.encode(encoding, errors="ignore").decode("utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        if repaired and repaired != text:
+            return repaired
+    return text
+
+
+def _normalize_team_directory_value(value: Any) -> str:
+    repaired = _repair_mojibake_text(value).strip().lower()
+    normalized = unicodedata.normalize("NFKD", repaired)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    compact = re.sub(r"[^a-z0-9]+", "", ascii_only)
+    aliases = {
+        "turkey": "turkiye",
+        "turkiye": "turkiye",
+        "turkiyecumhuriyeti": "turkiye",
+        "superlig": "superlig",
+    }
+    return aliases.get(compact, compact)
+
+
+def _canonical_country_label(value: Any) -> str:
+    repaired = _repair_mojibake_text(value)
+    if _normalize_team_directory_value(repaired) == "turkiye":
+        return "Türkiye"
+    return repaired
+
+
 @app.get("/teams")
 async def list_teams(
     league: Optional[str] = Query(default=None),
@@ -4248,16 +4285,10 @@ async def list_teams(
             query = query.not_.is_("sofascore_id", "null")
         except Exception:
             pass
-        if league:
-            query = query.eq("league", league)
-        if country:
-            query = query.eq("country", country)
-        if q:
-            query = query.ilike("name", f"%{q}%")
         result = (
             query.order("league")
             .order("name")
-            .range(offset, offset + limit - 1)
+            .range(0, 9999)
             .execute()
         )
     except Exception as exc:
@@ -4275,11 +4306,11 @@ async def list_teams(
         items.append(
             {
                 "id": team_id,
-                "name": str(row.get("name") or cache_row.get("team_name") or ""),
-                "league": str(row.get("league") or ""),
-                "country": str(row.get("country") or cache_row.get("country") or ""),
+                "name": _repair_mojibake_text(row.get("name") or cache_row.get("team_name") or ""),
+                "league": _repair_mojibake_text(row.get("league") or ""),
+                "country": _canonical_country_label(row.get("country") or cache_row.get("country") or ""),
                 "logo_url": row.get("logo_url") or cache_row.get("logo_url"),
-                "coach_name": row.get("coach_name") or cache_row.get("coach_name"),
+                "coach_name": _repair_mojibake_text(row.get("coach_name") or cache_row.get("coach_name")),
                 "sofascore_id": row.get("sofascore_id"),
                 "coach_sofascore_id": row.get("coach_sofascore_id") or cache_row.get("coach_sofascore_id"),
                 "sofascore_team_url": row.get("sofascore_team_url") or cache_row.get("sofascore_url"),
@@ -4288,10 +4319,72 @@ async def list_teams(
             }
         )
 
+    normalized_league = _normalize_team_directory_value(league)
+    normalized_country = _normalize_team_directory_value(country)
+    normalized_query = _normalize_team_directory_value(q)
+
+    filtered_items = [
+        item
+        for item in items
+        if (
+            not normalized_league
+            or normalized_league in _normalize_team_directory_value(item.get("league"))
+        )
+        and (
+            not normalized_country
+            or normalized_country == _normalize_team_directory_value(item.get("country"))
+        )
+        and (
+            not normalized_query
+            or normalized_query in _normalize_team_directory_value(item.get("name"))
+        )
+    ]
+
+    paged_items = filtered_items[offset : offset + limit]
+
     return {
-        "count": int(result.count or len(items)),
-        "items": items,
+        "count": len(filtered_items),
+        "items": paged_items,
     }
+
+
+@app.get("/teams/{team_id}/logo")
+async def get_team_logo(team_id: str) -> Response:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    team_row: Dict[str, Any] = {}
+    try:
+        team_row = (
+            client.table("teams")
+            .select("id,sofascore_id")
+            .eq("id", team_id)
+            .limit(1)
+            .execute()
+            .data
+            or [{}]
+        )[0]
+    except Exception:
+        team_row = {}
+
+    sofascore_team_id = int(team_row.get("sofascore_id", 0) or 0)
+    if sofascore_team_id <= 0:
+        raise HTTPException(status_code=404, detail="Team logo not found.")
+
+    asset = await sofascore.get_team_logo_asset(sofascore_team_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Team logo fetch failed.")
+
+    content, content_type = asset
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800"},
+    )
 
 
 @app.get("/matches/today")

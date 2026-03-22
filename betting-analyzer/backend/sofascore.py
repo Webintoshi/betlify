@@ -308,6 +308,51 @@ class SofaScoreService:
 
         return None
 
+    async def _fetch_binary(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[Tuple[bytes, str]]:
+        await asyncio.sleep(0.5)
+        max_attempts = 1 if not self.proxy_pool.enabled else min(3, self.proxy_pool.size)
+        request_headers = dict(HEADERS)
+        if headers:
+            request_headers.update(headers)
+
+        for attempt in range(1, max_attempts + 1):
+            proxy = self.proxy_pool.next()
+            proxy_masked = mask_proxy(proxy)
+            try:
+                async with AsyncSession(impersonate="chrome120") as session:
+                    response = await session.get(
+                        url,
+                        headers=request_headers,
+                        timeout=20,
+                        proxy=proxy,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Sofascore binary request failed (attempt=%s proxy=%s): %s",
+                    attempt,
+                    proxy_masked,
+                    exc,
+                )
+                continue
+
+            if response.status_code == 429:
+                logger.warning("Sofascore binary 429 - 60s bekleniyor (proxy=%s)", proxy_masked)
+                await asyncio.sleep(60)
+                continue
+
+            if response.status_code == 403:
+                logger.error("Sofascore binary 403: %s (proxy=%s)", url, proxy_masked)
+                continue
+
+            if response.status_code >= 400:
+                logger.error("HTTP %s: %s (proxy=%s)", response.status_code, url, proxy_masked)
+                continue
+
+            content_type = str(response.headers.get("content-type") or "image/webp").split(";")[0].strip() or "image/webp"
+            return response.content, content_type
+
+        return None
+
     async def _request(
         self,
         endpoint: str,
@@ -1114,6 +1159,17 @@ class SofaScoreService:
             return None
         normalized = self._parse_team_profile_payload(payload if isinstance(payload, dict) else {}, team_id)
         return normalized or {}
+
+    async def get_team_logo_asset(self, team_id: int) -> Optional[Tuple[bytes, str]]:
+        if team_id <= 0:
+            return None
+        return await self._fetch_binary(
+            SOFASCORE_TEAM_LOGO_URL.format(team_id=team_id),
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Referer": "https://www.sofascore.com/",
+            },
+        )
 
     async def sync_team_profile(
         self,
@@ -3420,6 +3476,10 @@ async def get_team_performance(team_id: int) -> Optional[Dict[str, Any]]:
 
 async def get_team_profile(team_id: int) -> Optional[Dict[str, Any]]:
     return await _default_service.get_team_profile(team_id)
+
+
+async def get_team_logo_asset(team_id: int) -> Optional[Tuple[bytes, str]]:
+    return await _default_service.get_team_logo_asset(team_id)
 
 
 async def sync_team_profile(team_id: str, sofascore_team_id: int, force: bool = False) -> Dict[str, Any]:
