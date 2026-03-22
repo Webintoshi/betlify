@@ -1233,6 +1233,33 @@ def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
             mapped[key] = float(odd)
         except (TypeError, ValueError):
             continue
+    if mapped:
+        return mapped
+
+    # Fallback: odds snapshot tablosundan oku (betfair-only filtrelenmez)
+    try:
+        odds_rows = (
+            client.table("odds")
+            .select("market,odd,recorded_at")
+            .eq("match_id", match_id)
+            .order("recorded_at", desc=True)
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+        for row in odds_rows:
+            key = _normalize_market_key(str(row.get("market") or ""))
+            if not key or key in mapped:
+                continue
+            try:
+                odd_value = float(row.get("odd"))
+            except (TypeError, ValueError):
+                continue
+            if odd_value > 0:
+                mapped[key] = odd_value
+    except Exception:
+        logger.exception("odds table fallback read failed.")
     return mapped
 
 
