@@ -2278,6 +2278,11 @@ async def _run_match_analysis(
         "ht_home": float((engine_result.get("lambda", {}) or {}).get("ht_home", 0.0) or 0.0),
         "ht_away": float((engine_result.get("lambda", {}) or {}).get("ht_away", 0.0) or 0.0),
     }
+    odd_map = {
+        market: float(odd)
+        for market, odd in odds.items()
+        if market in SUPPORTED_MARKETS and float(odd) > 0
+    }
     ev_result = _build_ev_result_from_engine(
         engine_result=engine_result,
         confidence_threshold=confidence_threshold,
