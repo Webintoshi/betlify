@@ -279,6 +279,63 @@ class BettingScheduler:
         logger.info("Sofascore gunluk gorevi tamamlandi. total=%s detay=%s", total, by_date)
         return {"total_events": total, "by_date": by_date}
 
+    async def refresh_sofascore_cache_for_upcoming_matches(self) -> Dict[str, Any]:
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed_matches": 0, "updated_matches": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
+        if self.supabase is None:
+            return {"processed_matches": 0, "updated_matches": 0}
+
+        today = datetime.now(self.timezone).date().isoformat()
+        tomorrow = (datetime.now(self.timezone).date() + timedelta(days=1)).isoformat()
+        try:
+            result = (
+                self.supabase.table("matches")
+                .select("id,match_date,status")
+                .gte("match_date", f"{today}T00:00:00")
+                .lte("match_date", f"{tomorrow}T23:59:59")
+                .in_("status", ["scheduled", "live", "finished"])
+                .order("match_date")
+                .limit(120)
+                .execute()
+            )
+            matches = result.data or []
+        except Exception:
+            logger.exception("refresh_sofascore_cache_for_upcoming_matches: match query failed.")
+            return {"processed_matches": 0, "updated_matches": 0}
+
+        processed = 0
+        updated = 0
+        for row in matches:
+            match_id = str(row.get("id") or "")
+            if not match_id:
+                continue
+            processed += 1
+            try:
+                sync_result = await self.sofascore.sync_match_sofascore_bundle(match_id, force=False)
+                if isinstance(sync_result, dict) and bool(sync_result.get("updated")):
+                    updated += 1
+            except Exception:
+                logger.exception("refresh_sofascore_cache_for_upcoming_matches failed. match_id=%s", match_id)
+            await asyncio.sleep(0.5)
+
+        logger.info(
+            "Sofascore cache sync gorevi tamamlandi. processed=%s updated=%s",
+            processed,
+            updated,
+        )
+        return {"processed_matches": processed, "updated_matches": updated}
+
+    async def refresh_sofascore_team_logos(self) -> Dict[str, Any]:
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed": 0, "updated": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
+        result = self.sofascore.refresh_team_logos(force=False, limit=0)
+        logger.info(
+            "Sofascore team logo gorevi tamamlandi. processed=%s updated=%s",
+            result.get("processed", 0),
+            result.get("updated", 0),
+        )
+        return result
+
     async def populate_today_team_stats_history(self) -> Dict[str, Any]:
         if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
             return {"processed_matches": 0, "updated_teams": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
@@ -681,10 +738,26 @@ class BettingScheduler:
                 replace_existing=True,
             )
             self.scheduler.add_job(
+                self.refresh_sofascore_cache_for_upcoming_matches,
+                "interval",
+                hours=6,
+                id="sofascore-cache-sync-6h",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
                 self.refresh_sofascore_two_hour_prematch,
                 "interval",
                 minutes=30,
                 id="sofascore-prematch-2h",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_sofascore_team_logos,
+                "cron",
+                day_of_week="mon",
+                hour=10,
+                minute=0,
+                id="sofascore-team-logos-weekly",
                 replace_existing=True,
             )
         self.scheduler.add_job(

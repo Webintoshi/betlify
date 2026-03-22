@@ -147,13 +147,26 @@ function normalizeName(value: string): string {
     .replace(/[^a-z0-9]/g, "");
 }
 
-function TeamAvatar({ name }: { name: string }) {
+function TeamAvatar({ name, logoUrl }: { name: string; logoUrl?: string | null }) {
+  const [imageError, setImageError] = useState<boolean>(false);
+  const normalizedLogo = typeof logoUrl === "string" ? logoUrl.trim() : "";
+  const showLogo = Boolean(normalizedLogo) && !imageError;
   return (
     <div className="flex flex-col items-center gap-3">
       <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-accent/20 to-accent-secondary/10 border border-accent/20 flex items-center justify-center">
-        <span className="text-lg font-bold text-foreground-primary">
-          {initials(name)}
-        </span>
+        {showLogo ? (
+          <img
+            src={normalizedLogo}
+            alt={`${name} logo`}
+            className="h-12 w-12 object-contain"
+            loading="lazy"
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <span className="text-lg font-bold text-foreground-primary">
+            {initials(name)}
+          </span>
+        )}
       </div>
       <span className="text-sm font-semibold text-foreground-primary text-center max-w-[120px]">
         {name}
@@ -546,7 +559,10 @@ export default function MatchDetailsPage() {
 
             {/* Teams */}
             <div className="flex items-center gap-8 sm:gap-16">
-              <TeamAvatar name={data.match.home_team.name} />
+              <TeamAvatar
+                name={data.match.home_team.name}
+                logoUrl={data.match.home_team.logo_url}
+              />
               
               <div className="flex flex-col items-center gap-2">
                 <span className="text-3xl font-bold text-foreground-muted">VS</span>
@@ -557,7 +573,10 @@ export default function MatchDetailsPage() {
                 )}
               </div>
               
-              <TeamAvatar name={data.match.away_team.name} />
+              <TeamAvatar
+                name={data.match.away_team.name}
+                logoUrl={data.match.away_team.logo_url}
+              />
             </div>
           </div>
         </CardContent>

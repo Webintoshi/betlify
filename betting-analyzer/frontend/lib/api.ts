@@ -4,6 +4,8 @@ export type DashboardMatch = {
   match_id: string;
   home_team: string;
   away_team: string;
+  home_logo_url?: string | null;
+  away_logo_url?: string | null;
   league: string;
   match_date: string;
   market_type: string;
@@ -126,11 +128,13 @@ export type MatchAnalysisResponse = {
       id: string;
       name: string;
       country?: string | null;
+      logo_url?: string | null;
     };
     away_team: {
       id: string;
       name: string;
       country?: string | null;
+      logo_url?: string | null;
     };
   };
   form?: {

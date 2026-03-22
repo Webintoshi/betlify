@@ -19,6 +19,7 @@ from proxy_pool import ProxyPool, mask_proxy
 logger = logging.getLogger("sofascore")
 
 BASE_URL = "https://www.sofascore.com/api/v1"
+SOFASCORE_TEAM_LOGO_URL = "https://api.sofascore.app/api/v1/team/{team_id}/image"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -306,6 +307,8 @@ class SofaScoreService:
         select_columns = "id,name,country,league"
         if has_sofascore_column:
             select_columns += ",sofascore_id"
+        if self._has_column("teams", "logo_url"):
+            select_columns += ",logo_url"
         try:
             result = (
                 self.supabase.table("teams")
@@ -335,6 +338,415 @@ class SofaScoreService:
             return rows[0].get("id") if rows else None
         except Exception:
             return None
+
+    @staticmethod
+    def _team_logo_url(team_sofascore_id: int) -> str:
+        if team_sofascore_id <= 0:
+            return ""
+        return SOFASCORE_TEAM_LOGO_URL.format(team_id=team_sofascore_id)
+
+    def _resolve_team_uuid_by_sofascore_id(self, sofascore_team_id: int) -> Optional[str]:
+        if self.supabase is None or sofascore_team_id <= 0:
+            return None
+        if not self._has_column("teams", "sofascore_id"):
+            return None
+        try:
+            result = (
+                self.supabase.table("teams")
+                .select("id")
+                .eq("sofascore_id", sofascore_team_id)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if not rows:
+                return None
+            return str(rows[0].get("id") or "") or None
+        except Exception:
+            return None
+
+    def sync_team_logo(
+        self,
+        *,
+        team_id: Optional[str],
+        sofascore_team_id: int,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"updated": False, "reason": "supabase_unavailable"}
+        if sofascore_team_id <= 0:
+            return {"updated": False, "reason": "invalid_sofascore_team_id"}
+
+        resolved_team_id = str(team_id or "").strip() or self._resolve_team_uuid_by_sofascore_id(sofascore_team_id) or ""
+        if not resolved_team_id:
+            return {"updated": False, "reason": "team_not_found"}
+
+        now = datetime.now(timezone.utc)
+        logo_url = self._team_logo_url(sofascore_team_id)
+        if not logo_url:
+            return {"updated": False, "reason": "logo_url_missing"}
+
+        stale = True
+        if not force and self._has_column("teams", "logo_last_fetched_at"):
+            try:
+                existing = (
+                    self.supabase.table("teams")
+                    .select("logo_url,logo_last_fetched_at")
+                    .eq("id", resolved_team_id)
+                    .limit(1)
+                    .execute()
+                )
+                row = (existing.data or [None])[0]
+                if isinstance(row, dict):
+                    existing_logo = str(row.get("logo_url") or "")
+                    last_fetched_raw = str(row.get("logo_last_fetched_at") or "")
+                    if existing_logo and last_fetched_raw:
+                        last_fetched = datetime.fromisoformat(last_fetched_raw.replace("Z", "+00:00"))
+                        stale = (now - last_fetched) > timedelta(days=7)
+            except Exception:
+                stale = True
+
+        if not force and not stale:
+            return {"updated": False, "reason": "fresh_cache", "logo_url": logo_url}
+
+        payload: Dict[str, Any] = {}
+        if self._has_column("teams", "logo_url"):
+            payload["logo_url"] = logo_url
+        if self._has_column("teams", "logo_source"):
+            payload["logo_source"] = "sofascore"
+        if self._has_column("teams", "logo_status"):
+            payload["logo_status"] = "ready"
+        if self._has_column("teams", "logo_last_fetched_at"):
+            payload["logo_last_fetched_at"] = now.isoformat()
+        if self._has_column("teams", "logo_etag"):
+            payload["logo_etag"] = f"sofascore-team-{sofascore_team_id}"
+        if self._has_column("teams", "sofascore_last_synced_at"):
+            payload["sofascore_last_synced_at"] = now.isoformat()
+        if self._has_column("teams", "sofascore_id"):
+            payload["sofascore_id"] = sofascore_team_id
+
+        if not payload:
+            return {"updated": False, "reason": "columns_missing"}
+
+        try:
+            self.supabase.table("teams").update(payload).eq("id", resolved_team_id).execute()
+            return {"updated": True, "team_id": resolved_team_id, "logo_url": logo_url}
+        except Exception:
+            logger.exception("team logo sync failed. team_id=%s sofascore_team_id=%s", resolved_team_id, sofascore_team_id)
+            return {"updated": False, "reason": "update_failed", "team_id": resolved_team_id}
+
+    def _team_id_map_from_sofascore_ids(self, sofascore_team_ids: List[int]) -> Dict[int, str]:
+        if self.supabase is None or not sofascore_team_ids:
+            return {}
+        if not self._has_column("teams", "sofascore_id"):
+            return {}
+        try:
+            unique_ids = sorted({int(team_id) for team_id in sofascore_team_ids if int(team_id) > 0})
+            if not unique_ids:
+                return {}
+            rows = (
+                self.supabase.table("teams")
+                .select("id,sofascore_id")
+                .in_("sofascore_id", unique_ids)
+                .execute()
+                .data
+                or []
+            )
+            return {
+                _safe_int(row.get("sofascore_id")): str(row.get("id"))
+                for row in rows
+                if _safe_int(row.get("sofascore_id")) > 0 and str(row.get("id") or "")
+            }
+        except Exception:
+            return {}
+
+    def _upsert_team_season_stats_cache(self, *, team_id: str, payload: Dict[str, Any]) -> bool:
+        if self.supabase is None or not team_id:
+            return False
+        if not self._has_column("team_season_stats_cache", "team_id"):
+            return False
+        row = {
+            "team_id": team_id,
+            "team_sofascore_id": _safe_int(payload.get("team_sofascore_id")),
+            "tournament_id": _safe_int(payload.get("tournament_id")),
+            "season_id": _safe_int(payload.get("season_id")),
+            "position": _safe_int(payload.get("position")),
+            "matches_played": _safe_int(payload.get("matches_played")),
+            "goals_for": round(float(payload.get("goals_for", 0) or 0), 3),
+            "goals_against": round(float(payload.get("goals_against", 0) or 0), 3),
+            "goals_per_match": round(float(payload.get("goals_per_match", 0) or 0), 3),
+            "goals_conceded_per_match": round(float(payload.get("goals_conceded_per_match", 0) or 0), 3),
+            "clean_sheets": _safe_int(payload.get("clean_sheets")),
+            "assists": _safe_int(payload.get("assists")),
+            "expected_goals": round(float(payload.get("expected_goals", 0) or 0), 3),
+            "shots_on_target": round(float(payload.get("shots_on_target", 0) or 0), 3),
+            "big_chances": round(float(payload.get("big_chances", 0) or 0), 3),
+            "possession": round(float(payload.get("possession", 0) or 0), 3),
+            "avg_rating": round(float(payload.get("avg_rating", 0) or 0), 3),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if row["team_sofascore_id"] <= 0 or row["tournament_id"] <= 0 or row["season_id"] <= 0:
+            return False
+        try:
+            self.supabase.table("team_season_stats_cache").upsert(
+                row,
+                on_conflict="team_id,tournament_id,season_id",
+            ).execute()
+            return True
+        except Exception:
+            logger.exception("team_season_stats_cache upsert failed. team_id=%s", team_id)
+            return False
+
+    def _replace_team_top_players_cache(
+        self,
+        *,
+        team_id: str,
+        team_sofascore_id: int,
+        players: List[Dict[str, Any]],
+        tournament_id: Optional[int],
+        season_id: Optional[int],
+    ) -> int:
+        if self.supabase is None or not team_id:
+            return 0
+        if not self._has_column("team_top_players_cache", "team_id"):
+            return 0
+
+        t_id = int(tournament_id or 0)
+        s_id = int(season_id or 0)
+        try:
+            cleanup = self.supabase.table("team_top_players_cache").delete().eq("team_id", team_id)
+            cleanup = cleanup.eq("tournament_id", t_id) if t_id > 0 else cleanup.is_("tournament_id", "null")
+            cleanup = cleanup.eq("season_id", s_id) if s_id > 0 else cleanup.is_("season_id", "null")
+            cleanup.execute()
+        except Exception:
+            logger.exception("team_top_players_cache cleanup failed. team_id=%s", team_id)
+
+        saved = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for player in players:
+            name = str(player.get("name") or "").strip()
+            if not name:
+                continue
+            row = {
+                "team_id": team_id,
+                "team_sofascore_id": int(team_sofascore_id),
+                "tournament_id": t_id if t_id > 0 else None,
+                "season_id": s_id if s_id > 0 else None,
+                "player_sofascore_id": _safe_int(player.get("player_id")) or None,
+                "player_name": name,
+                "position": str(player.get("position") or ""),
+                "rating": round(float(player.get("rating", 0) or 0), 2),
+                "minutes_played": _safe_int(player.get("minutes_played")),
+                "updated_at": now_iso,
+            }
+            try:
+                self.supabase.table("team_top_players_cache").upsert(
+                    row,
+                    on_conflict="team_id,tournament_id,season_id,player_name",
+                ).execute()
+                saved += 1
+            except Exception:
+                logger.exception("team_top_players_cache upsert failed. team_id=%s player=%s", team_id, name)
+        return saved
+
+    def _upsert_league_standings_cache(
+        self,
+        *,
+        tournament_id: int,
+        season_id: int,
+        rows: List[Dict[str, Any]],
+    ) -> int:
+        if self.supabase is None:
+            return 0
+        if tournament_id <= 0 or season_id <= 0:
+            return 0
+        if not self._has_column("league_standings_cache", "tournament_id"):
+            return 0
+
+        by_sofascore = self._team_id_map_from_sofascore_ids(
+            [_safe_int(row.get("team_sofascore_id")) for row in rows if isinstance(row, dict)]
+        )
+        saved = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+            if team_sofascore_id <= 0:
+                continue
+            payload = {
+                "tournament_id": int(tournament_id),
+                "season_id": int(season_id),
+                "team_id": by_sofascore.get(team_sofascore_id),
+                "team_sofascore_id": team_sofascore_id,
+                "team_name": str(row.get("team_name") or ""),
+                "position": _safe_int(row.get("position")),
+                "played": _safe_int(row.get("played")),
+                "wins": _safe_int(row.get("wins")),
+                "draws": _safe_int(row.get("draws")),
+                "losses": _safe_int(row.get("losses")),
+                "points": _safe_int(row.get("points")),
+                "goals_for": _safe_int(row.get("goals_for")),
+                "goals_against": _safe_int(row.get("goals_against")),
+                "goal_diff": _safe_int(row.get("goal_diff")),
+                "form": str(row.get("form") or ""),
+                "updated_at": now_iso,
+            }
+            try:
+                self.supabase.table("league_standings_cache").upsert(
+                    payload,
+                    on_conflict="tournament_id,season_id,team_sofascore_id",
+                ).execute()
+                saved += 1
+            except Exception:
+                logger.exception(
+                    "league_standings_cache upsert failed. tournament=%s season=%s team_sofascore_id=%s",
+                    tournament_id,
+                    season_id,
+                    team_sofascore_id,
+                )
+        return saved
+
+    async def sync_match_sofascore_bundle(self, match_id: str, force: bool = False) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"updated": False, "reason": "supabase_unavailable"}
+
+        mapping = await self._resolve_sofascore_team_ids_for_match(match_id)
+        if not isinstance(mapping, dict):
+            return {"updated": False, "reason": "mapping_missing"}
+
+        event_id = _safe_int(mapping.get("event_id"))
+        home_sofa_id = _safe_int(mapping.get("home_sofascore_id"))
+        away_sofa_id = _safe_int(mapping.get("away_sofascore_id"))
+        match_row = self._resolve_match_by_id(match_id)
+        if not match_row:
+            return {"updated": False, "reason": "match_missing"}
+
+        home_team_id = str(match_row.get("home_team_id") or "")
+        away_team_id = str(match_row.get("away_team_id") or "")
+        logo_updates = 0
+        for team_id, sofa_id in [(home_team_id, home_sofa_id), (away_team_id, away_sofa_id)]:
+            if sofa_id <= 0:
+                continue
+            logo_res = self.sync_team_logo(team_id=team_id, sofascore_team_id=sofa_id, force=force)
+            if logo_res.get("updated"):
+                logo_updates += 1
+
+        tournament_id = 0
+        season_id = 0
+        if event_id > 0:
+            event = await self.get_event_detail(event_id, ttl_seconds=120 if force else 900)
+            if isinstance(event, dict):
+                tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
+                unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+                season = event.get("season", {}) if isinstance(event.get("season"), dict) else {}
+                tournament_id = _safe_int(unique.get("id") or tournament.get("id"))
+                season_id = _safe_int(season.get("id") or season.get("year"))
+
+        season_cache_updates = 0
+        top_players_updates = 0
+        standings_updates = 0
+        if tournament_id > 0 and season_id > 0:
+            standings = await self.get_tournament_standings(tournament_id, season_id)
+            if isinstance(standings, list):
+                standings_updates = self._upsert_league_standings_cache(
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                    rows=standings,
+                )
+
+            for team_id, sofa_id in [(home_team_id, home_sofa_id), (away_team_id, away_sofa_id)]:
+                if not team_id or sofa_id <= 0:
+                    continue
+                season_stats = await self.get_team_season_statistics(sofa_id, tournament_id, season_id)
+                if isinstance(season_stats, dict) and season_stats:
+                    if self._upsert_team_season_stats_cache(team_id=team_id, payload=season_stats):
+                        season_cache_updates += 1
+                top_players = await self.get_team_top_players(
+                    sofa_id,
+                    limit=8,
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                )
+                if isinstance(top_players, list) and top_players:
+                    top_players_updates += self._replace_team_top_players_cache(
+                        team_id=team_id,
+                        team_sofascore_id=sofa_id,
+                        players=top_players,
+                        tournament_id=tournament_id,
+                        season_id=season_id,
+                    )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for team_id in [home_team_id, away_team_id]:
+            if not team_id:
+                continue
+            if self._has_column("teams", "sofascore_last_synced_at"):
+                try:
+                    self.supabase.table("teams").update({"sofascore_last_synced_at": now_iso}).eq("id", team_id).execute()
+                except Exception:
+                    logger.exception("teams sofascore_last_synced_at update failed. team_id=%s", team_id)
+
+        return {
+            "updated": True,
+            "match_id": match_id,
+            "event_id": event_id,
+            "tournament_id": tournament_id,
+            "season_id": season_id,
+            "logo_updates": logo_updates,
+            "season_cache_updates": season_cache_updates,
+            "top_players_updates": top_players_updates,
+            "standings_updates": standings_updates,
+        }
+
+    def refresh_team_logos(self, *, force: bool = False, limit: int = 0) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed": 0, "updated": 0, "reason": "supabase_unavailable"}
+        if not self._has_column("teams", "sofascore_id"):
+            return {"processed": 0, "updated": 0, "reason": "sofascore_id_missing"}
+
+        try:
+            try:
+                result = (
+                    self.supabase.table("teams")
+                    .select("id,sofascore_id,logo_url,logo_last_fetched_at")
+                    .not_.is_("sofascore_id", "null")
+                    .order("name")
+                    .execute()
+                )
+            except Exception:
+                result = (
+                    self.supabase.table("teams")
+                    .select("id,sofascore_id")
+                    .not_.is_("sofascore_id", "null")
+                    .order("name")
+                    .execute()
+                )
+            rows = result.data or []
+        except Exception:
+            logger.exception("team logo refresh list failed.")
+            return {"processed": 0, "updated": 0, "reason": "query_failed"}
+
+        processed = 0
+        updated = 0
+        for row in rows:
+            team_id = str(row.get("id") or "")
+            sofascore_team_id = _safe_int(row.get("sofascore_id"))
+            if not team_id or sofascore_team_id <= 0:
+                continue
+            processed += 1
+            response = self.sync_team_logo(
+                team_id=team_id,
+                sofascore_team_id=sofascore_team_id,
+                force=force,
+            )
+            if response.get("updated"):
+                updated += 1
+            if limit > 0 and processed >= int(limit):
+                break
+
+        logger.info("Team logo refresh tamamlandi. processed=%s updated=%s force=%s", processed, updated, force)
+        return {"processed": processed, "updated": updated, "force": bool(force)}
 
     @staticmethod
     def _event_goals(event: Dict[str, Any]) -> Tuple[int, int]:
@@ -579,6 +991,18 @@ class SofaScoreService:
         }
         if has_sofascore_column:
             record["sofascore_id"] = sofascore_team_id
+        if self._has_column("teams", "logo_url"):
+            record["logo_url"] = self._team_logo_url(sofascore_team_id)
+        if self._has_column("teams", "logo_source"):
+            record["logo_source"] = "sofascore"
+        if self._has_column("teams", "logo_status"):
+            record["logo_status"] = "ready"
+        if self._has_column("teams", "logo_last_fetched_at"):
+            record["logo_last_fetched_at"] = datetime.now(timezone.utc).isoformat()
+        if self._has_column("teams", "logo_etag"):
+            record["logo_etag"] = f"sofascore-team-{sofascore_team_id}"
+        if self._has_column("teams", "sofascore_last_synced_at"):
+            record["sofascore_last_synced_at"] = datetime.now(timezone.utc).isoformat()
         try:
             if has_sofascore_column:
                 self.supabase.table("teams").upsert(record, on_conflict="sofascore_id").execute()
@@ -626,6 +1050,8 @@ class SofaScoreService:
             away_uuid = self._ensure_team(away_team, league_name, country)
             if not home_uuid or not away_uuid:
                 continue
+            self.sync_team_logo(team_id=home_uuid, sofascore_team_id=_safe_int(home_team.get("id")), force=False)
+            self.sync_team_logo(team_id=away_uuid, sofascore_team_id=_safe_int(away_team.get("id")), force=False)
 
             start_ts = _safe_int(event.get("startTimestamp"))
             match_date = datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat() if start_ts > 0 else None
@@ -1202,7 +1628,7 @@ class SofaScoreService:
         if expected_goals <= 0 and matches_played > 0 and goals_for > 0:
             expected_goals = goals_for / per_match_divisor
 
-        return {
+        normalized = {
             "team_sofascore_id": team_id,
             "tournament_id": tournament_id,
             "season_id": season_id,
@@ -1219,6 +1645,10 @@ class SofaScoreService:
             "possession": round(possession, 3),
             "avg_rating": round(avg_rating, 3),
         }
+        team_uuid = self._resolve_team_uuid_by_sofascore_id(team_id)
+        if team_uuid:
+            self._upsert_team_season_stats_cache(team_id=team_uuid, payload=normalized)
+        return normalized
 
     async def get_tournament_standings(
         self,
@@ -1266,6 +1696,12 @@ class SofaScoreService:
                     "goal_diff": scores_for - scores_against,
                     "form": row.get("form"),
                 }
+            )
+        if normalized:
+            self._upsert_league_standings_cache(
+                tournament_id=tournament_id,
+                season_id=season_id,
+                rows=normalized,
             )
         return normalized
 
@@ -1477,6 +1913,15 @@ class SofaScoreService:
         selected = rows[: max(1, int(limit))]
         for row in selected:
             row.pop("appearances", None)
+        team_uuid = self._resolve_team_uuid_by_sofascore_id(team_id)
+        if team_uuid and selected:
+            self._replace_team_top_players_cache(
+                team_id=team_uuid,
+                team_sofascore_id=team_id,
+                players=selected,
+                tournament_id=tournament_id,
+                season_id=season_id,
+            )
         return selected
 
     @staticmethod

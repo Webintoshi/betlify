@@ -379,17 +379,136 @@ def _fetch_match_base(client: Client, match_id: str) -> Dict[str, Any]:
 
 
 def _fetch_team_rows(client: Client, home_team_id: str, away_team_id: str) -> Dict[str, Dict[str, Any]]:
-    full_select = "id,name,market_value,api_team_id,pi_rating,country"
-    fallback_select = "id,name,market_value,api_team_id,country"
+    full_select = "id,name,market_value,api_team_id,pi_rating,country,sofascore_id,logo_url"
+    fallback_select = "id,name,market_value,api_team_id,pi_rating,country,sofascore_id"
+    fallback_select_legacy = "id,name,market_value,api_team_id,country"
     try:
         try:
             result = client.table("teams").select(full_select).in_("id", [home_team_id, away_team_id]).execute()
         except Exception:
-            result = client.table("teams").select(fallback_select).in_("id", [home_team_id, away_team_id]).execute()
+            try:
+                result = client.table("teams").select(fallback_select).in_("id", [home_team_id, away_team_id]).execute()
+            except Exception:
+                result = client.table("teams").select(fallback_select_legacy).in_("id", [home_team_id, away_team_id]).execute()
         return {row["id"]: row for row in (result.data or []) if row.get("id")}
     except Exception:
         logger.exception("Team rows read failed.")
         return {}
+
+
+def _fetch_cached_sofascore_bundle(
+    client: Client,
+    *,
+    home_team_id: str,
+    away_team_id: str,
+) -> Dict[str, Any]:
+    bundle: Dict[str, Any] = {
+        "tournament_id": 0,
+        "season_id": 0,
+        "season_team_stats": {"home": {}, "away": {}},
+        "top_players": {"home": [], "away": []},
+        "standings": [],
+    }
+    team_ids = [home_team_id, away_team_id]
+
+    season_rows: List[Dict[str, Any]] = []
+    try:
+        season_result = (
+            client.table("team_season_stats_cache")
+            .select("*")
+            .in_("team_id", team_ids)
+            .order("updated_at", desc=True)
+            .limit(100)
+            .execute()
+        )
+        season_rows = season_result.data or []
+    except Exception:
+        season_rows = []
+
+    home_candidates = [row for row in season_rows if str(row.get("team_id") or "") == home_team_id]
+    away_candidates = [row for row in season_rows if str(row.get("team_id") or "") == away_team_id]
+    home_row = home_candidates[0] if home_candidates else {}
+    away_row = away_candidates[0] if away_candidates else {}
+
+    tournament_id = int(home_row.get("tournament_id", 0) or away_row.get("tournament_id", 0) or 0)
+    season_id = int(home_row.get("season_id", 0) or away_row.get("season_id", 0) or 0)
+
+    if tournament_id > 0 and season_id > 0:
+        for candidates, side in [(home_candidates, "home"), (away_candidates, "away")]:
+            preferred = next(
+                (
+                    row
+                    for row in candidates
+                    if int(row.get("tournament_id", 0) or 0) == tournament_id
+                    and int(row.get("season_id", 0) or 0) == season_id
+                ),
+                None,
+            )
+            if isinstance(preferred, dict):
+                bundle["season_team_stats"][side] = preferred
+    else:
+        if isinstance(home_row, dict) and home_row:
+            bundle["season_team_stats"]["home"] = home_row
+        if isinstance(away_row, dict) and away_row:
+            bundle["season_team_stats"]["away"] = away_row
+
+    bundle["tournament_id"] = tournament_id
+    bundle["season_id"] = season_id
+
+    top_players_rows: List[Dict[str, Any]] = []
+    try:
+        players_query = (
+            client.table("team_top_players_cache")
+            .select("*")
+            .in_("team_id", team_ids)
+            .order("updated_at", desc=True)
+            .limit(200)
+        )
+        top_players_rows = players_query.execute().data or []
+    except Exception:
+        top_players_rows = []
+
+    def _select_players(team_id: str) -> List[Dict[str, Any]]:
+        candidates = [row for row in top_players_rows if str(row.get("team_id") or "") == team_id]
+        if tournament_id > 0 and season_id > 0:
+            scoped = [
+                row
+                for row in candidates
+                if int(row.get("tournament_id", 0) or 0) == tournament_id
+                and int(row.get("season_id", 0) or 0) == season_id
+            ]
+            if scoped:
+                candidates = scoped
+        candidates.sort(
+            key=lambda row: (
+                float(row.get("rating", 0) or 0),
+                int(row.get("minutes_played", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return candidates[:5]
+
+    bundle["top_players"]["home"] = _select_players(home_team_id)
+    bundle["top_players"]["away"] = _select_players(away_team_id)
+
+    if tournament_id > 0 and season_id > 0:
+        try:
+            standings_rows = (
+                client.table("league_standings_cache")
+                .select("*")
+                .eq("tournament_id", tournament_id)
+                .eq("season_id", season_id)
+                .order("position")
+                .limit(40)
+                .execute()
+                .data
+                or []
+            )
+            bundle["standings"] = standings_rows
+        except Exception:
+            bundle["standings"] = []
+
+    return bundle
 
 
 def _fetch_team_stats(client: Client, team_ids: List[str]) -> List[Dict[str, Any]]:
@@ -1588,7 +1707,51 @@ async def _run_match_analysis(
     sofascore_tournament_id = 0
     sofascore_season_id = 0
     sofascore_mapping: Optional[Dict[str, int]] = None
-    should_refresh_enrichment = bool(ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None and (refresh_live or include_details))
+    cached_sofascore_bundle = _fetch_cached_sofascore_bundle(
+        client,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    if isinstance(cached_sofascore_bundle.get("season_team_stats"), dict):
+        cached_season_stats = cached_sofascore_bundle.get("season_team_stats", {})
+        if isinstance(cached_season_stats.get("home"), dict):
+            sofascore_season_stats["home"] = cached_season_stats.get("home", {}) or {}
+        if isinstance(cached_season_stats.get("away"), dict):
+            sofascore_season_stats["away"] = cached_season_stats.get("away", {}) or {}
+    if isinstance(cached_sofascore_bundle.get("top_players"), dict):
+        cached_players = cached_sofascore_bundle.get("top_players", {})
+        sofascore_top_players["home"] = list(cached_players.get("home") or [])
+        sofascore_top_players["away"] = list(cached_players.get("away") or [])
+    if isinstance(cached_sofascore_bundle.get("standings"), list):
+        sofascore_standings = list(cached_sofascore_bundle.get("standings") or [])
+
+    sofascore_tournament_id = int(cached_sofascore_bundle.get("tournament_id", 0) or 0)
+    sofascore_season_id = int(cached_sofascore_bundle.get("season_id", 0) or 0)
+    if sofascore_tournament_id > 0 or sofascore_season_id > 0:
+        sofascore_event_meta = {
+            "event_id": sofascore_match_id or None,
+            "tournament_id": sofascore_tournament_id or None,
+            "tournament_name": "",
+            "season_id": sofascore_season_id or None,
+            "season_name": "",
+            "source": "cache",
+        }
+
+    cache_missing_for_details = bool(
+        include_details
+        and (
+            not sofascore_season_stats.get("home")
+            or not sofascore_season_stats.get("away")
+            or not sofascore_top_players.get("home")
+            or not sofascore_top_players.get("away")
+            or not sofascore_standings
+            or not str((team_rows.get(home_team_id, {}) or {}).get("logo_url") or "").strip()
+            or not str((team_rows.get(away_team_id, {}) or {}).get("logo_url") or "").strip()
+        )
+    )
+    should_refresh_enrichment = bool(
+        ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None and (refresh_live or cache_missing_for_details)
+    )
     if api_match_id > 0 and refresh_live:
         await api_football.get_odds(api_match_id)
         await api_football.get_predictions(api_match_id)
@@ -1601,6 +1764,42 @@ async def _run_match_analysis(
             h2h_summary = {"ratio": _h2h_points_ratio(h2h_rows, home_api_id)}
 
     if ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None:
+        if include_details and not refresh_live and cache_missing_for_details:
+            try:
+                sync_info = await sofascore.sync_match_sofascore_bundle(resolved_match_id, force=False)
+                if isinstance(sync_info, dict):
+                    sofascore_match_id = int(sync_info.get("event_id", 0) or sofascore_match_id)
+                    if int(sync_info.get("tournament_id", 0) or 0) > 0:
+                        sofascore_tournament_id = int(sync_info.get("tournament_id", 0) or 0)
+                    if int(sync_info.get("season_id", 0) or 0) > 0:
+                        sofascore_season_id = int(sync_info.get("season_id", 0) or 0)
+                cached_sofascore_bundle = _fetch_cached_sofascore_bundle(
+                    client,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                team_rows = _fetch_team_rows(client, home_team_id, away_team_id)
+                if isinstance(cached_sofascore_bundle.get("season_team_stats"), dict):
+                    cached_season_stats = cached_sofascore_bundle.get("season_team_stats", {})
+                    if isinstance(cached_season_stats.get("home"), dict):
+                        sofascore_season_stats["home"] = cached_season_stats.get("home", {}) or {}
+                    if isinstance(cached_season_stats.get("away"), dict):
+                        sofascore_season_stats["away"] = cached_season_stats.get("away", {}) or {}
+                if isinstance(cached_sofascore_bundle.get("top_players"), dict):
+                    cached_players = cached_sofascore_bundle.get("top_players", {})
+                    sofascore_top_players["home"] = list(cached_players.get("home") or [])
+                    sofascore_top_players["away"] = list(cached_players.get("away") or [])
+                if isinstance(cached_sofascore_bundle.get("standings"), list):
+                    sofascore_standings = list(cached_sofascore_bundle.get("standings") or [])
+                if int(cached_sofascore_bundle.get("tournament_id", 0) or 0) > 0:
+                    sofascore_tournament_id = int(cached_sofascore_bundle.get("tournament_id", 0) or 0)
+                if int(cached_sofascore_bundle.get("season_id", 0) or 0) > 0:
+                    sofascore_season_id = int(cached_sofascore_bundle.get("season_id", 0) or 0)
+            except Exception:
+                logger.exception("Sofascore cache sync failed. match_id=%s", resolved_match_id)
+
+            should_refresh_enrichment = bool(refresh_live)
+
         if should_refresh_enrichment:
             if sofascore_match_id > 0:
                 sofascore_mapping = await sofascore._resolve_sofascore_team_ids_for_match(resolved_match_id)
@@ -2084,11 +2283,13 @@ async def _run_match_analysis(
                 "id": match_row.get("home_team_id"),
                 "name": home_team.get("name", "Ev Sahibi"),
                 "country": home_team.get("country"),
+                "logo_url": home_team.get("logo_url"),
             },
             "away_team": {
                 "id": match_row.get("away_team_id"),
                 "name": away_team.get("name", "Deplasman"),
                 "country": away_team.get("country"),
+                "logo_url": away_team.get("logo_url"),
             },
         }
         home_attack_xg = _avg_stat(home_stats, "xg_for", limit=10)
@@ -2527,6 +2728,75 @@ async def admin_refresh_odds() -> Dict[str, Any]:
     return {"status": "ok", **result}
 
 
+@app.post("/admin/sync/match/{match_id}/sofascore-cache")
+async def admin_sync_match_sofascore_cache(
+    match_id: str,
+    force: bool = Query(default=False),
+) -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    resolved_match_id = _resolve_match_id(client, match_id)
+    if not resolved_match_id:
+        raise HTTPException(status_code=404, detail="Match not found.")
+    result = await sofascore.sync_match_sofascore_bundle(resolved_match_id, force=force)
+    return {"status": "ok", "match_id": resolved_match_id, **result}
+
+
+@app.post("/admin/sync/logos")
+async def admin_sync_team_logos(
+    force: bool = Query(default=False),
+    limit: int = Query(default=0, ge=0, le=2000),
+) -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    result = sofascore.refresh_team_logos(force=force, limit=limit)
+    return {"status": "ok", **result}
+
+
+@app.get("/admin/sync/status")
+async def admin_sync_status() -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    cache_counts: Dict[str, int] = {}
+    for table_name in ["team_season_stats_cache", "team_top_players_cache", "league_standings_cache"]:
+        try:
+            rows = client.table(table_name).select("id", count="exact").limit(1).execute()
+            cache_counts[table_name] = int(rows.count or 0)
+        except Exception:
+            cache_counts[table_name] = 0
+
+    stale_logo_count = 0
+    try:
+        stale_query = (
+            client.table("teams")
+            .select("id", count="exact")
+            .or_("logo_url.is.null,logo_status.eq.pending")
+            .not_.is_("sofascore_id", "null")
+            .limit(1)
+            .execute()
+        )
+        stale_logo_count = int(stale_query.count or 0)
+    except Exception:
+        stale_logo_count = 0
+
+    return {
+        "status": "ok",
+        "sofascore_enrichment_enabled": bool(ENABLE_SOFASCORE_ENRICHMENT),
+        "cache_counts": cache_counts,
+        "stale_logo_count": stale_logo_count,
+        "scheduler": scheduler.scheduler_status(),
+    }
+
+
 @app.post("/coupons")
 async def create_coupon(body: CouponCreateRequest) -> Dict[str, Any]:
     if not body.selections:
@@ -2864,11 +3134,14 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
 
     rows = result.data or []
     team_ids = list({value for row in rows for value in [row.get("home_team_id"), row.get("away_team_id")] if value})
-    teams_map: Dict[str, str] = {}
+    teams_map: Dict[str, Dict[str, Any]] = {}
     if team_ids:
         try:
-            teams = client.table("teams").select("id,name").in_("id", team_ids).execute().data or []
-            teams_map = {row["id"]: row.get("name", "Unknown Team") for row in teams}
+            try:
+                teams = client.table("teams").select("id,name,logo_url").in_("id", team_ids).execute().data or []
+            except Exception:
+                teams = client.table("teams").select("id,name").in_("id", team_ids).execute().data or []
+            teams_map = {row["id"]: row for row in teams if row.get("id")}
         except Exception:
             logger.exception("teams map read failed.")
 
@@ -2914,8 +3187,10 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
                 "league": row["league"],
                 "match_date": row["match_date"],
                 "status": row["status"],
-                "home_team": teams_map.get(row["home_team_id"], "Home Team"),
-                "away_team": teams_map.get(row["away_team_id"], "Away Team"),
+                "home_team": str((teams_map.get(row["home_team_id"], {}) or {}).get("name", "Home Team")),
+                "away_team": str((teams_map.get(row["away_team_id"], {}) or {}).get("name", "Away Team")),
+                "home_logo_url": (teams_map.get(row["home_team_id"], {}) or {}).get("logo_url"),
+                "away_logo_url": (teams_map.get(row["away_team_id"], {}) or {}).get("logo_url"),
                 "confidence_score": analysis["confidence_score"],
                 "recommended": recommended_flag,
                 "market_type": best_market.get("market_type", "MS1"),
