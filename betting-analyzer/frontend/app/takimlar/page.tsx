@@ -26,15 +26,22 @@ function repairMojibakeText(value?: string | null): string {
   if (!text) {
     return "";
   }
-  if (!/[ÃÄÅ]/.test(text)) {
-    return text;
+
+  const decodedEscapes = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  const baseText = decodedEscapes !== text ? decodedEscapes : text;
+
+  if (!/[ÃÄÅ]/.test(baseText)) {
+    return baseText;
   }
+
   try {
-    const bytes = Uint8Array.from(Array.from(text), (character) => character.charCodeAt(0) & 0xff);
+    const bytes = Uint8Array.from(Array.from(baseText), (character) => character.charCodeAt(0) & 0xff);
     const repaired = new TextDecoder("utf-8").decode(bytes).trim();
-    return repaired || text;
+    return repaired || baseText;
   } catch {
-    return text;
+    return baseText;
   }
 }
 
@@ -92,15 +99,15 @@ const LEAGUE_PRIORITY_ORDER = [
 ];
 
 const LEAGUE_DISPLAY_LABELS: Record<string, string> = {
-  trendyolsuperlig: "Trendyol S\u00fcper Lig",
+  trendyolsuperlig: "Trendyol Süper Lig",
   premierleague: "Premier Lig",
   premierlig: "Premier Lig",
   laliga: "La Liga",
   seriea: "Serie A",
   bundesliga: "Bundesliga",
   ligue1: "Ligue 1",
-  uefachampionsleague: "\u015eampiyonlar Ligi",
-  sampiyonlarligi: "\u015eampiyonlar Ligi",
+  uefachampionsleague: "Şampiyonlar Ligi",
+  sampiyonlarligi: "Şampiyonlar Ligi",
   uefaeuropaleague: "Avrupa Ligi",
   avrupaligi: "Avrupa Ligi",
   uefaeuropaconferenceleague: "Konferans Ligi",
@@ -108,14 +115,14 @@ const LEAGUE_DISPLAY_LABELS: Record<string, string> = {
   championship: "Championship",
   eredivisie: "Eredivisie",
   primeiraliga: "Primeira Liga",
-  proleague: "Bel\u00e7ika Pro League",
-  scottishpremiership: "\u0130sko\u00e7ya Premiership",
-  superleaguegreece: "Yunanistan S\u00fcper Ligi",
+  proleague: "Belçika Pro League",
+  scottishpremiership: "İskoçya Premiership",
+  superleaguegreece: "Yunanistan Süper Ligi",
   trendyol1lig: "Trendyol 1. Lig",
   "2bundesliga": "2. Bundesliga",
   serieb: "Serie B",
   ligue2: "Ligue 2",
-  brasileiraobetano: "Brezilya S\u00e9rie A",
+  brasileiraobetano: "Brezilya Série A",
   mls: "MLS",
   saudiproleague: "Suudi Pro Lig",
   j1league: "J1 League",
@@ -219,7 +226,7 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
   const syncStatus = normalizeValue(team.profile_sync_status || "");
   const badgeVariant =
     syncStatus === "ready" ? "success" : syncStatus === "stale" ? "warning" : "neutral";
-  const statusLabel = syncStatus === "ready" ? "Haz\u0131r" : syncStatus === "stale" ? "G\u00fcncellenecek" : "Bekliyor";
+  const statusLabel = syncStatus === "ready" ? "Hazır" : syncStatus === "stale" ? "Güncellenecek" : "Bekliyor";
 
   return (
     <Card hover className="flex h-full flex-col gap-4 p-4">
@@ -239,15 +246,15 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
 
       <dl className="grid gap-3 text-xs">
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Tak\u0131m</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">Takım</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{teamName}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">\u00dclkesi</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">Ülkesi</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{countryName}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Teknik Direkt\u00f6r</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">Teknik Direktör</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{coachName || "Bilinmiyor"}</dd>
         </div>
       </dl>
@@ -260,7 +267,7 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
           href={`/takimler/${team.id}`}
           className="inline-flex items-center gap-2 rounded-lg border border-accent px-3 py-2 text-xs font-black uppercase tracking-wide text-accent transition-colors duration-150 hover:bg-accent hover:text-white"
         >
-          Tak\u0131m Detay\u0131
+          Takım Detayı
         </Link>
       </div>
     </Card>
@@ -295,7 +302,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
       getTeams({ limit: 6000 })
     ]);
   } catch (error) {
-    fetchError = error instanceof Error ? error.message : "Tak\u0131m verisi al\u0131namad\u0131";
+    fetchError = error instanceof Error ? error.message : "Takım verisi alınamadı";
   }
 
   const leagueOptions = buildLeagueOptions(allTeamsResponse.items ?? []);
@@ -312,15 +319,15 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
             </Badge>
             <p className="text-xs font-black uppercase tracking-[0.3em] text-accent">Betlify</p>
           </div>
-          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">Tak\u0131mlar</h1>
+          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">Takımlar</h1>
           <p className="mt-1 text-sm font-bold uppercase tracking-wide text-foreground-muted">
-            Lig bazl\u0131 tak\u0131m dizini, logo, \u00fclke ve teknik direkt\u00f6r profili
+            Lig bazlı takım dizini, logo, ülke ve teknik direktör profili
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="neutral" size="md">
-            Toplam {teamsResponse.count} tak\u0131m
+            Toplam {teamsResponse.count} takım
           </Badge>
           {league ? (
             <Badge variant="success" size="md">
@@ -329,7 +336,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           ) : null}
           {country ? (
             <Badge variant="warning" size="md">
-              \u00dclke: {country}
+              Ülke: {country}
             </Badge>
           ) : null}
         </div>
@@ -342,7 +349,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
             </svg>
           </div>
-          <CardTitle>Tak\u0131m Filtresi</CardTitle>
+          <CardTitle>Takım Filtresi</CardTitle>
         </div>
 
         <form action="/takimler" className="grid gap-4 lg:grid-cols-4">
@@ -353,7 +360,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               defaultValue={league}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">T\u00fcm Ligler</option>
+              <option value="">Tüm Ligler</option>
               {leagueOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -363,13 +370,13 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">\u00dclke</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Ülke</label>
             <select
               name="country"
               defaultValue={country}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">T\u00fcm \u00dclkeler</option>
+              <option value="">Tüm Ülkeler</option>
               {countryOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -379,7 +386,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Tak\u0131m Ara</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Takım Ara</label>
             <input
               type="text"
               name="q"
@@ -421,9 +428,9 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               </svg>
             </div>
             <div className="min-w-0">
-              <CardTitle className="text-sm">Tak\u0131m verisi \u015fu anda y\u00fcklenemedi</CardTitle>
+              <CardTitle className="text-sm">Takım verisi şu anda yüklenemedi</CardTitle>
               <CardDescription className="mt-1 normal-case tracking-normal">
-                Backend ba\u011flant\u0131s\u0131 veya ortam de\u011fi\u015fkeni hatas\u0131 var. Ayr\u0131nt\u0131: {fetchError}
+                Backend bağlantısı veya ortam değişkeni hatası var. Ayrıntı: {fetchError}
               </CardDescription>
             </div>
           </div>
@@ -440,10 +447,10 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
             </div>
             <div>
               <p className="text-sm font-black uppercase tracking-wide text-foreground-secondary">
-                Filtreye uygun tak\u0131m bulunamad\u0131
+                Filtreye uygun takım bulunamadı
               </p>
               <p className="mt-1 text-xs font-bold uppercase tracking-wide text-foreground-muted">
-                Lig veya \u00fclke filtresini gev\u015fetip tekrar deneyin
+                Lig veya ülke filtresini gevşetip tekrar deneyin
               </p>
             </div>
           </div>
@@ -455,7 +462,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <div className="flex flex-wrap items-center gap-3 border-b border-card-border pb-3">
                 <CardTitle className="text-base">{getLeagueDisplayLabel(leagueName)}</CardTitle>
                 <Badge variant="neutral" size="sm">
-                  {teams.length} tak\u0131m
+                  {teams.length} takım
                 </Badge>
               </div>
 

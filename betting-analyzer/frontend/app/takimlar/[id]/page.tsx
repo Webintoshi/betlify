@@ -14,6 +14,30 @@ function normalizeValue(value?: string | null): string {
   return String(value ?? "").trim();
 }
 
+function repairMojibakeText(value?: string | null): string {
+  const text = normalizeValue(value);
+  if (!text) {
+    return "";
+  }
+
+  const decodedEscapes = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  const baseText = decodedEscapes !== text ? decodedEscapes : text;
+
+  if (!/[ÃÄÅ]/.test(baseText)) {
+    return baseText;
+  }
+
+  try {
+    const bytes = Uint8Array.from(Array.from(baseText), (character) => character.charCodeAt(0) & 0xff);
+    const repaired = new TextDecoder("utf-8").decode(bytes).trim();
+    return repaired || baseText;
+  } catch {
+    return baseText;
+  }
+}
+
 function TeamLogo({ teamId, teamName }: { teamId: string; teamName: string }) {
   return (
     <div className="flex h-24 w-24 items-center justify-center rounded-2xl border border-card-border bg-background-secondary p-3 shadow-card">
@@ -37,9 +61,10 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
   }
 
   const team = response.team;
-  const coachName = normalizeValue(team.coach_name) || "Bilinmiyor";
-  const leagueName = normalizeValue(team.league) || "Bilinmeyen Lig";
-  const countryName = normalizeValue(team.country) || "Bilinmiyor";
+  const teamName = repairMojibakeText(team.name);
+  const coachName = repairMojibakeText(team.coach_name) || "Bilinmiyor";
+  const leagueName = repairMojibakeText(team.league) || "Bilinmeyen Lig";
+  const countryName = repairMojibakeText(team.country) || "Bilinmiyor";
   const syncStatus = normalizeValue(team.profile_sync_status);
   const statusLabel = syncStatus === "ready" ? "Hazır" : syncStatus === "stale" ? "Güncellenecek" : "Bekliyor";
   const badgeVariant = syncStatus === "ready" ? "success" : syncStatus === "stale" ? "warning" : "neutral";
@@ -48,7 +73,7 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
     <section className="space-y-8 animate-fade-in">
       <div className="flex flex-col gap-4 border-b-2 border-card-border pb-6 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-5">
-          <TeamLogo teamId={team.id} teamName={team.name} />
+          <TeamLogo teamId={team.id} teamName={teamName} />
           <div>
             <div className="mb-3 flex flex-wrap items-center gap-3">
               <Badge variant="accent" size="sm">
@@ -58,7 +83,7 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
                 {statusLabel}
               </Badge>
             </div>
-            <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">{team.name}</h1>
+            <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">{teamName}</h1>
             <p className="mt-2 text-sm font-bold uppercase tracking-wide text-foreground-muted">
               {leagueName} • {countryName}
             </p>
@@ -85,7 +110,7 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
               <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Takım</p>
-              <p className="mt-2 text-sm font-bold text-foreground-primary">{team.name}</p>
+              <p className="mt-2 text-sm font-bold text-foreground-primary">{teamName}</p>
             </div>
             <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
               <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">Lig</p>
