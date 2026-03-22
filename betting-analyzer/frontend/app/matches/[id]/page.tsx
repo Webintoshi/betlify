@@ -137,6 +137,16 @@ function toNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function formatMetric(value: number, digits = 1): string {
+  return Number.isFinite(value) ? value.toFixed(digits) : "0.0";
+}
+
+function normalizeName(value: string): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
 function TeamAvatar({ name }: { name: string }) {
   return (
     <div className="flex flex-col items-center gap-3">
@@ -319,6 +329,131 @@ export default function MatchDetailsPage() {
     const parsed = Number(rawEventId ?? 0);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }, [data]);
+  const sofascoreSeasonHome = useMemo(() => {
+    const raw = data?.sofascore?.season_team_stats?.home;
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  }, [data]);
+  const sofascoreSeasonAway = useMemo(() => {
+    const raw = data?.sofascore?.season_team_stats?.away;
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  }, [data]);
+  const seasonComparisonRows = useMemo(() => {
+    const homePlayed = toNumber(sofascoreSeasonHome?.matches_played, 0);
+    const awayPlayed = toNumber(sofascoreSeasonAway?.matches_played, 0);
+    return [
+      {
+        key: "avg_rating",
+        label: "Ortalama Reyting",
+        home: toNumber(sofascoreSeasonHome?.avg_rating, 0),
+        away: toNumber(sofascoreSeasonAway?.avg_rating, 0),
+        digits: 2,
+        suffix: "",
+      },
+      {
+        key: "matches",
+        label: "Maclar",
+        home: homePlayed,
+        away: awayPlayed,
+        digits: 0,
+        suffix: "",
+      },
+      {
+        key: "goals",
+        label: "Atilan Gol",
+        home: toNumber(sofascoreSeasonHome?.goals_for, 0),
+        away: toNumber(sofascoreSeasonAway?.goals_for, 0),
+        digits: 0,
+        suffix: "",
+      },
+      {
+        key: "goals_per_match",
+        label: "Mac Basina Gol",
+        home: toNumber(sofascoreSeasonHome?.goals_per_match, 0),
+        away: toNumber(sofascoreSeasonAway?.goals_per_match, 0),
+        digits: 1,
+        suffix: "",
+      },
+      {
+        key: "conceded",
+        label: "Yenilen Gol",
+        home: toNumber(sofascoreSeasonHome?.goals_against, 0),
+        away: toNumber(sofascoreSeasonAway?.goals_against, 0),
+        digits: 0,
+        suffix: "",
+      },
+      {
+        key: "clean_sheets",
+        label: "Gol Yemedi",
+        home: toNumber(sofascoreSeasonHome?.clean_sheets, 0),
+        away: toNumber(sofascoreSeasonAway?.clean_sheets, 0),
+        digits: 0,
+        suffix: "",
+      },
+      {
+        key: "assists",
+        label: "Asist",
+        home: toNumber(sofascoreSeasonHome?.assists, 0),
+        away: toNumber(sofascoreSeasonAway?.assists, 0),
+        digits: 0,
+        suffix: "",
+      },
+      {
+        key: "possession",
+        label: "Topla Oynama",
+        home: toNumber(sofascoreSeasonHome?.possession, 0),
+        away: toNumber(sofascoreSeasonAway?.possession, 0),
+        digits: 1,
+        suffix: "%",
+      },
+    ];
+  }, [sofascoreSeasonHome, sofascoreSeasonAway]);
+  const homeTopPlayers = useMemo<Array<Record<string, unknown>>>(() => {
+    const rows = data?.sofascore?.top_players?.home;
+    return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
+  }, [data]);
+  const awayTopPlayers = useMemo<Array<Record<string, unknown>>>(() => {
+    const rows = data?.sofascore?.top_players?.away;
+    return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
+  }, [data]);
+  const standingsRows = useMemo(() => {
+    const rows = data?.sofascore?.standings;
+    return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
+  }, [data]);
+  const homeStanding = useMemo(() => {
+    if (!data?.match) {
+      return null;
+    }
+    const expectedId = toNumber(sofascoreSeasonHome?.team_sofascore_id, 0);
+    const expectedName = normalizeName(data.match.home_team.name);
+    return (
+      standingsRows.find((row) => {
+        const rowId = toNumber(row.team_sofascore_id, 0);
+        const rowName = normalizeName(String(row.team_name ?? ""));
+        return (expectedId > 0 && rowId === expectedId) || (expectedName.length > 0 && rowName === expectedName);
+      }) ?? null
+    );
+  }, [standingsRows, data, sofascoreSeasonHome]);
+  const awayStanding = useMemo(() => {
+    if (!data?.match) {
+      return null;
+    }
+    const expectedId = toNumber(sofascoreSeasonAway?.team_sofascore_id, 0);
+    const expectedName = normalizeName(data.match.away_team.name);
+    return (
+      standingsRows.find((row) => {
+        const rowId = toNumber(row.team_sofascore_id, 0);
+        const rowName = normalizeName(String(row.team_name ?? ""));
+        return (expectedId > 0 && rowId === expectedId) || (expectedName.length > 0 && rowName === expectedName);
+      }) ?? null
+    );
+  }, [standingsRows, data, sofascoreSeasonAway]);
+  const hasSeasonStats = useMemo(
+    () => seasonComparisonRows.some((row) => toNumber(row.home, 0) > 0 || toNumber(row.away, 0) > 0),
+    [seasonComparisonRows]
+  );
+  const hasTopPlayers = homeTopPlayers.length > 0 || awayTopPlayers.length > 0;
+  const hasStandings = Boolean(homeStanding || awayStanding);
+  const showSofascoreInsights = hasSeasonStats || hasTopPlayers || hasStandings;
 
   const handleAddCoupon = () => {
     if (!data?.match || !data.recommended_market) {
@@ -429,6 +564,131 @@ export default function MatchDetailsPage() {
       </Card>
 
       {sofascoreEventId > 0 ? <SofaScoreLineupsEmbed eventId={sofascoreEventId} /> : null}
+
+      {showSofascoreInsights ? (
+        <Card className="overflow-hidden border-accent/20">
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>SofaScore Veri Merkezi</CardTitle>
+              <div className="flex items-center gap-2">
+                {data.sofascore?.event?.tournament_name ? (
+                  <Badge variant="neutral" size="sm">{String(data.sofascore.event.tournament_name)}</Badge>
+                ) : null}
+                {data.sofascore?.event?.season_name ? (
+                  <Badge variant="neutral" size="sm">{String(data.sofascore.event.season_name)}</Badge>
+                ) : null}
+              </div>
+            </div>
+            <CardDescription>Sezon istatistikleri, ilk 5 oyuncu ve lig sirasi</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {hasSeasonStats ? (
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="grid grid-cols-[1fr_auto_1fr] gap-2 border-b border-white/[0.08] pb-3 text-xs font-semibold uppercase tracking-wide text-foreground-muted">
+                  <span>{data.match.home_team.name}</span>
+                  <span className="px-2 text-center">Sezon Istatistikleri</span>
+                  <span className="text-right">{data.match.away_team.name}</span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {seasonComparisonRows.map((row) => (
+                    <div key={row.key} className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 text-sm">
+                      <span className="font-semibold text-foreground-primary">
+                        {formatMetric(toNumber(row.home, 0), row.digits)}
+                        {row.suffix}
+                      </span>
+                      <span className="rounded-md bg-white/[0.04] px-2 py-1 text-xs text-foreground-muted">{row.label}</span>
+                      <span className="text-right font-semibold text-foreground-primary">
+                        {formatMetric(toNumber(row.away, 0), row.digits)}
+                        {row.suffix}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              {hasTopPlayers ? (
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                  <p className="mb-3 text-sm font-semibold text-foreground-secondary">En iyi oyuncular</p>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground-muted">
+                        {data.match.home_team.name}
+                      </p>
+                      <ul className="space-y-2">
+                        {homeTopPlayers.slice(0, 5).map((item, index) => {
+                          const name = String(item.name ?? "Oyuncu");
+                          const rating = toNumber(item.rating, 0);
+                          const minutes = toNumber(item.minutes_played, 0);
+                          return (
+                            <li key={`home-top-${index}-${name}`} className="flex items-center justify-between rounded-lg border border-white/[0.06] px-3 py-2">
+                              <div>
+                                <p className="text-sm text-foreground-secondary">{name}</p>
+                                <p className="text-xs text-foreground-muted">{minutes} dk</p>
+                              </div>
+                              <Badge variant="accent" size="sm">{formatMetric(rating, 2)}</Badge>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-foreground-muted">
+                        {data.match.away_team.name}
+                      </p>
+                      <ul className="space-y-2">
+                        {awayTopPlayers.slice(0, 5).map((item, index) => {
+                          const name = String(item.name ?? "Oyuncu");
+                          const rating = toNumber(item.rating, 0);
+                          const minutes = toNumber(item.minutes_played, 0);
+                          return (
+                            <li key={`away-top-${index}-${name}`} className="flex items-center justify-between rounded-lg border border-white/[0.06] px-3 py-2">
+                              <div>
+                                <p className="text-sm text-foreground-secondary">{name}</p>
+                                <p className="text-xs text-foreground-muted">{minutes} dk</p>
+                              </div>
+                              <Badge variant="accent" size="sm">{formatMetric(rating, 2)}</Badge>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {hasStandings ? (
+                <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                  <p className="mb-3 text-sm font-semibold text-foreground-secondary">Lig sirasi</p>
+                  <div className="space-y-3">
+                    {[homeStanding, awayStanding].filter(Boolean).map((row, index) => {
+                      const standing = row as Record<string, unknown>;
+                      const teamName = String(standing.team_name ?? "Takim");
+                      const position = toNumber(standing.position, 0);
+                      const points = toNumber(standing.points, 0);
+                      const played = toNumber(standing.played, 0);
+                      const goalsFor = toNumber(standing.goals_for, 0);
+                      const goalsAgainst = toNumber(standing.goals_against, 0);
+                      return (
+                        <div key={`standing-${index}-${teamName}`} className="rounded-lg border border-white/[0.06] px-3 py-3">
+                          <div className="mb-1 flex items-center justify-between">
+                            <p className="text-sm font-semibold text-foreground-secondary">{teamName}</p>
+                            <Badge variant="neutral" size="sm">#{position}</Badge>
+                          </div>
+                          <p className="text-xs text-foreground-muted">
+                            Puan: {points} | Oynanan: {played} | Gol: {goalsFor}:{goalsAgainst}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
         {/* Left Column */}
