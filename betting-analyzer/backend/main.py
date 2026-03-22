@@ -6,7 +6,7 @@ import os
 import re
 import unicodedata
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -67,6 +67,23 @@ reset_refetch_state: Dict[str, Any] = {
     "success": 0,
     "failed": 0,
     "skipped_no_odds": 0,
+    "last_error": None,
+}
+backtest_task: Optional[asyncio.Task[Any]] = None
+backtest_state: Dict[str, Any] = {
+    "status": "idle",
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "params": None,
+    "processed": 0,
+    "total_matches_scanned": 0,
+    "success": 0,
+    "failed": 0,
+    "skipped_no_odds": 0,
+    "skipped_no_market": 0,
+    "summary": None,
+    "rows": [],
     "last_error": None,
 }
 
@@ -130,6 +147,17 @@ class SettingsUpdateRequest(BaseModel):
     minimum_confidence: float = Field(default=60.0, ge=50.0, le=80.0)
     minimum_ev: float = Field(default=0.0, ge=0.0, le=20.0)
     tracked_leagues: List[int] = Field(default_factory=list)
+
+
+class BacktestRunRequest(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    days_back: int = Field(default=30, ge=3, le=365)
+    league: Optional[str] = None
+    min_confidence: float = Field(default=51.0, ge=0.0, le=100.0)
+    include_non_recommended: bool = Field(default=True)
+    max_matches: int = Field(default=300, ge=20, le=3000)
+    store_rows: int = Field(default=500, ge=50, le=5000)
 
 
 async def _run_full_backfill() -> None:
@@ -1204,6 +1232,533 @@ def _compute_backtest_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "roi_pct": roi_pct,
         "by_market": sorted(by_market.values(), key=lambda item: item["count"], reverse=True),
     }
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _parse_backtest_date(value: Optional[str]) -> Optional[date]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _resolve_backtest_window(
+    *,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    days_back: int,
+) -> Tuple[date, date]:
+    today = datetime.now(scheduler.timezone).date()
+    end_value = _parse_backtest_date(end_date) or today
+    start_value = _parse_backtest_date(start_date)
+    if start_value is None:
+        span = max(1, int(days_back))
+        start_value = end_value - timedelta(days=span - 1)
+    if start_value > end_value:
+        start_value, end_value = end_value, start_value
+    return start_value, end_value
+
+
+def _fetch_finished_matches_for_backtest(
+    client: Client,
+    *,
+    start_date: date,
+    end_date: date,
+    league_filter: Optional[str],
+    max_matches: int,
+) -> List[Dict[str, Any]]:
+    start_iso = f"{start_date.isoformat()}T00:00:00+00:00"
+    end_iso = f"{end_date.isoformat()}T23:59:59+00:00"
+    query = (
+        client.table("matches")
+        .select("id,home_team_id,away_team_id,league,match_date,status,ft_home,ft_away,ht_home,ht_away")
+        .gte("match_date", start_iso)
+        .lte("match_date", end_iso)
+        .eq("status", "finished")
+        .not_.is_("ft_home", "null")
+        .not_.is_("ft_away", "null")
+        .order("match_date")
+        .limit(max(1, int(max_matches)))
+    )
+    if league_filter:
+        query = query.ilike("league", f"%{league_filter.strip()}%")
+    return query.execute().data or []
+
+
+def _fetch_team_stats_before(
+    client: Client,
+    *,
+    team_ids: List[str],
+    before_iso: str,
+    per_team_limit: int = 80,
+) -> Dict[str, List[Dict[str, Any]]]:
+    if not team_ids:
+        return {}
+    fetch_limit = max(60, int(per_team_limit) * max(1, len(team_ids)))
+    try:
+        rows = (
+            client.table("team_stats")
+            .select("*")
+            .in_("team_id", team_ids)
+            .lte("updated_at", before_iso)
+            .order("updated_at", desc=True)
+            .limit(fetch_limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        logger.exception("team_stats pre-match read failed.")
+        return {team_id: [] for team_id in team_ids}
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {team_id: [] for team_id in team_ids}
+    for row in rows:
+        team_id = str(row.get("team_id") or "")
+        if team_id not in grouped:
+            continue
+        bucket = grouped[team_id]
+        if len(bucket) >= per_team_limit:
+            continue
+        bucket.append(row)
+    return grouped
+
+
+def _fetch_h2h_rows_before(
+    client: Client,
+    *,
+    home_team_id: str,
+    away_team_id: str,
+    before_iso: str,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    max_rows = max(1, int(limit))
+    try:
+        direct = (
+            client.table("h2h")
+            .select("match_date,home_goals,away_goals,league,is_cup")
+            .eq("home_team_id", home_team_id)
+            .eq("away_team_id", away_team_id)
+            .lt("match_date", before_iso)
+            .order("match_date", desc=True)
+            .limit(max_rows)
+            .execute()
+        )
+        reverse = (
+            client.table("h2h")
+            .select("match_date,home_goals,away_goals,league,is_cup")
+            .eq("home_team_id", away_team_id)
+            .eq("away_team_id", home_team_id)
+            .lt("match_date", before_iso)
+            .order("match_date", desc=True)
+            .limit(max_rows)
+            .execute()
+        )
+    except Exception:
+        logger.exception("h2h pre-match read failed.")
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for row in direct.data or []:
+        normalized.append(
+            {
+                "match_date": row.get("match_date"),
+                "home_goals": int(row.get("home_goals", 0) or 0),
+                "away_goals": int(row.get("away_goals", 0) or 0),
+                "league": row.get("league"),
+                "is_cup": bool(row.get("is_cup", False)),
+            }
+        )
+    for row in reverse.data or []:
+        normalized.append(
+            {
+                "match_date": row.get("match_date"),
+                "home_goals": int(row.get("away_goals", 0) or 0),
+                "away_goals": int(row.get("home_goals", 0) or 0),
+                "league": row.get("league"),
+                "is_cup": bool(row.get("is_cup", False)),
+            }
+        )
+
+    normalized.sort(key=lambda item: str(item.get("match_date") or ""), reverse=True)
+    return normalized[:max_rows]
+
+
+def _fetch_odds_before(client: Client, match_id: str, before_iso: str) -> Dict[str, float]:
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
+    mapped: Dict[str, float] = {}
+
+    try:
+        rows = (
+            client.table("odds_history")
+            .select("market_type,current_odd,closing_odd,opening_odd,recorded_at")
+            .eq("match_id", match_id)
+            .eq("bookmaker", bookmaker)
+            .lte("recorded_at", before_iso)
+            .order("recorded_at", desc=True)
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            key = _normalize_market_key(str(row.get("market_type") or ""))
+            if not key or key in mapped:
+                continue
+            odd = row.get("current_odd") or row.get("closing_odd") or row.get("opening_odd")
+            try:
+                odd_value = float(odd)
+            except (TypeError, ValueError):
+                continue
+            if odd_value > 0:
+                mapped[key] = odd_value
+    except Exception:
+        logger.exception("odds_history pre-match read failed.")
+
+    if mapped:
+        return mapped
+
+    try:
+        rows = (
+            client.table("odds")
+            .select("market,odd,recorded_at")
+            .eq("match_id", match_id)
+            .lte("recorded_at", before_iso)
+            .order("recorded_at", desc=True)
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            key = _normalize_market_key(str(row.get("market") or ""))
+            if not key or key in mapped:
+                continue
+            try:
+                odd_value = float(row.get("odd"))
+            except (TypeError, ValueError):
+                continue
+            if odd_value > 0:
+                mapped[key] = odd_value
+    except Exception:
+        logger.exception("odds table pre-match read failed.")
+    return mapped
+
+
+def _fetch_bookmaker_odds_entries_before(client: Client, match_id: str, before_iso: str) -> List[Dict[str, Any]]:
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
+    grouped: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = (
+            client.table("odds_history")
+            .select("bookmaker,market_type,current_odd,closing_odd,opening_odd,recorded_at")
+            .eq("match_id", match_id)
+            .eq("bookmaker", bookmaker)
+            .lte("recorded_at", before_iso)
+            .order("recorded_at", desc=True)
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    for row in rows:
+        book_name = str(row.get("bookmaker") or "unknown").strip().lower() or "unknown"
+        market = _normalize_market_key(str(row.get("market_type") or ""))
+        if not market:
+            continue
+        odd_raw = row.get("current_odd") or row.get("closing_odd") or row.get("opening_odd")
+        try:
+            odd = float(odd_raw)
+        except (TypeError, ValueError):
+            continue
+        if odd <= 1.0:
+            continue
+        grouped.setdefault(book_name, {"book": book_name})
+        if market not in grouped[book_name]:
+            grouped[book_name][market] = round(odd, 4)
+
+    if grouped:
+        return list(grouped.values())
+
+    fallback = _fetch_odds_before(client, match_id, before_iso)
+    if not fallback:
+        return []
+    return [{"book": "internal", **{k: float(v) for k, v in fallback.items() if float(v) > 1.0}}]
+
+
+def _build_backtest_row(
+    *,
+    client: Client,
+    match_row: Dict[str, Any],
+    min_confidence: float,
+    include_non_recommended: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    match_id = str(match_row.get("id") or "")
+    if not match_id:
+        return None, "invalid_match_id"
+
+    kickoff_dt = _parse_iso_datetime(match_row.get("match_date"))
+    if kickoff_dt is None:
+        return None, "invalid_match_date"
+    kickoff_iso = kickoff_dt.astimezone(timezone.utc).isoformat()
+
+    home_team_id = str(match_row.get("home_team_id") or "")
+    away_team_id = str(match_row.get("away_team_id") or "")
+    team_rows = _fetch_team_rows(client, home_team_id, away_team_id)
+    home_team = team_rows.get(home_team_id, {}) if isinstance(team_rows, dict) else {}
+    away_team = team_rows.get(away_team_id, {}) if isinstance(team_rows, dict) else {}
+
+    stats_grouped = _fetch_team_stats_before(
+        client,
+        team_ids=[home_team_id, away_team_id],
+        before_iso=kickoff_iso,
+        per_team_limit=60,
+    )
+    home_stats = list(stats_grouped.get(home_team_id, []) or [])
+    away_stats = list(stats_grouped.get(away_team_id, []) or [])
+
+    home_form_payload = _build_form_payload(recent_matches=[], fallback_stats=home_stats)
+    away_form_payload = _build_form_payload(recent_matches=[], fallback_stats=away_stats)
+    h2h_rows = _fetch_h2h_rows_before(
+        client,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        before_iso=kickoff_iso,
+        limit=10,
+    )
+    bookmaker_odds = _fetch_bookmaker_odds_entries_before(client, match_id, kickoff_iso)
+    opening_odds = _fetch_odds_before(client, match_id, kickoff_iso)
+
+    if not bookmaker_odds:
+        return None, "no_odds"
+
+    engine_match_data = _build_engine_match_data(
+        match_id=match_id,
+        league=str(match_row.get("league", "") or "default"),
+        home_stats=home_stats,
+        away_stats=away_stats,
+        home_form_payload=home_form_payload,
+        away_form_payload=away_form_payload,
+        h2h_rows=h2h_rows,
+    )
+
+    engine_result = run_prediction_engine(
+        match_data=engine_match_data,
+        home_stats=engine_match_data.get("home_team_stats", {}),
+        away_stats=engine_match_data.get("away_team_stats", {}),
+        h2h=engine_match_data.get("h2h", {}),
+        bookmakers=bookmaker_odds,
+        opening_odds=opening_odds,
+    )
+    ev_result = _build_ev_result_from_engine(engine_result=engine_result, confidence_threshold=min_confidence)
+    best_market = ev_result.get("best_market")
+    if not isinstance(best_market, dict):
+        return None, "no_market"
+
+    recommended = bool(best_market.get("recommended", False))
+    if not include_non_recommended and not recommended:
+        return None, "not_recommended"
+
+    market_type = str(best_market.get("market_type") or best_market.get("market") or "").strip()
+    if not market_type:
+        return None, "no_market"
+
+    try:
+        odd = float(best_market.get("odd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        odd = 0.0
+    try:
+        probability = float(best_market.get("probability", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        probability = 0.0
+    try:
+        ev_value = float(best_market.get("ev", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        ev_value = 0.0
+
+    ft_home = int(match_row.get("ft_home", 0) or 0)
+    ft_away = int(match_row.get("ft_away", 0) or 0)
+    ht_home_raw = match_row.get("ht_home")
+    ht_away_raw = match_row.get("ht_away")
+    ht_home = int(ht_home_raw) if ht_home_raw is not None else None
+    ht_away = int(ht_away_raw) if ht_away_raw is not None else None
+    hit = _evaluate_prediction_hit(
+        market_type,
+        home_score=ft_home,
+        away_score=ft_away,
+        ht_home=ht_home,
+        ht_away=ht_away,
+    )
+    if hit is True and odd > 1.0:
+        profit_units = round(odd - 1.0, 4)
+    elif hit is False:
+        profit_units = -1.0
+    else:
+        profit_units = 0.0
+
+    confidence = float(engine_result.get("confidence_score", 0.0) or 0.0)
+    home_name = str(home_team.get("name") or "Ev Sahibi")
+    away_name = str(away_team.get("name") or "Deplasman")
+
+    return (
+        {
+            "match_id": match_id,
+            "date": str(match_row.get("match_date") or ""),
+            "league": str(match_row.get("league") or ""),
+            "home_team": home_name,
+            "away_team": away_name,
+            "score": f"{ft_home}-{ft_away}",
+            "our_market": market_type,
+            "our_probability": round(probability, 4),
+            "our_odd": round(odd, 4),
+            "our_ev": round(ev_value, 4),
+            "confidence_score": round(confidence, 2),
+            "recommended": recommended,
+            "reject_reason": best_market.get("reject_reason"),
+            "kelly_pct": round(float(best_market.get("kelly_pct", 0.0) or 0.0), 2),
+            "hit": hit,
+            "profit_units": profit_units,
+            "meta": engine_result.get("meta", {}),
+        },
+        None,
+    )
+
+
+async def _run_backtest_lab(request: BacktestRunRequest) -> None:
+    start_date, end_date = _resolve_backtest_window(
+        start_date=request.start_date,
+        end_date=request.end_date,
+        days_back=request.days_back,
+    )
+
+    backtest_state.update(
+        {
+            "status": "running",
+            "running": True,
+            "started_at": datetime.now(scheduler.timezone).isoformat(),
+            "finished_at": None,
+            "params": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "days_back": int(request.days_back),
+                "league": str(request.league or ""),
+                "min_confidence": float(request.min_confidence),
+                "include_non_recommended": bool(request.include_non_recommended),
+                "max_matches": int(request.max_matches),
+                "store_rows": int(request.store_rows),
+            },
+            "processed": 0,
+            "total_matches_scanned": 0,
+            "success": 0,
+            "failed": 0,
+            "skipped_no_odds": 0,
+            "skipped_no_market": 0,
+            "summary": None,
+            "rows": [],
+            "last_error": None,
+        }
+    )
+
+    try:
+        client = get_supabase_client()
+        matches = _fetch_finished_matches_for_backtest(
+            client,
+            start_date=start_date,
+            end_date=end_date,
+            league_filter=request.league,
+            max_matches=request.max_matches,
+        )
+
+        total = len(matches)
+        success = 0
+        failed = 0
+        skipped_no_odds = 0
+        skipped_no_market = 0
+        all_rows: List[Dict[str, Any]] = []
+
+        for index, match_row in enumerate(matches, start=1):
+            try:
+                row, skip_reason = _build_backtest_row(
+                    client=client,
+                    match_row=match_row,
+                    min_confidence=float(request.min_confidence),
+                    include_non_recommended=bool(request.include_non_recommended),
+                )
+                if row is not None:
+                    all_rows.append(row)
+                    success += 1
+                elif skip_reason == "no_odds":
+                    skipped_no_odds += 1
+                else:
+                    skipped_no_market += 1
+            except Exception:
+                failed += 1
+                logger.exception("Backtest analyze failed. match_id=%s", match_row.get("id"))
+
+            if index % 25 == 0:
+                await asyncio.sleep(0)
+
+            backtest_state.update(
+                {
+                    "processed": index,
+                    "total_matches_scanned": total,
+                    "success": success,
+                    "failed": failed,
+                    "skipped_no_odds": skipped_no_odds,
+                    "skipped_no_market": skipped_no_market,
+                }
+            )
+
+        summary = _compute_backtest_summary(all_rows)
+        sorted_rows = sorted(all_rows, key=lambda item: str(item.get("date") or ""), reverse=True)
+        store_limit = max(1, int(request.store_rows))
+
+        backtest_state.update(
+            {
+                "status": "completed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "processed": total,
+                "total_matches_scanned": total,
+                "success": success,
+                "failed": failed,
+                "skipped_no_odds": skipped_no_odds,
+                "skipped_no_market": skipped_no_market,
+                "summary": summary,
+                "rows": sorted_rows[:store_limit],
+                "last_error": None,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Backtest run failed.")
+        backtest_state.update(
+            {
+                "status": "failed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "last_error": str(exc),
+            }
+        )
 
 
 def _fetch_odds(client: Client, match_id: str) -> Dict[str, float]:
@@ -2474,6 +3029,7 @@ async def reset_and_refetch() -> Dict[str, Any]:
 async def admin_stats() -> Dict[str, Any]:
     backfill_running = backfill_task is not None and not backfill_task.done()
     reset_running = reset_refetch_task is not None and not reset_refetch_task.done()
+    backtest_running = backtest_task is not None and not backtest_task.done()
     return {
         "backfill": {
             "status": backfill_state.get("status"),
@@ -2495,6 +3051,164 @@ async def admin_stats() -> Dict[str, Any]:
             "skipped_no_odds": reset_refetch_state.get("skipped_no_odds"),
             "last_error": reset_refetch_state.get("last_error"),
         },
+        "backtest": {
+            "status": backtest_state.get("status"),
+            "running": backtest_state.get("running") or backtest_running,
+            "started_at": backtest_state.get("started_at"),
+            "finished_at": backtest_state.get("finished_at"),
+            "processed": backtest_state.get("processed"),
+            "total_matches_scanned": backtest_state.get("total_matches_scanned"),
+            "success": backtest_state.get("success"),
+            "failed": backtest_state.get("failed"),
+            "skipped_no_odds": backtest_state.get("skipped_no_odds"),
+            "skipped_no_market": backtest_state.get("skipped_no_market"),
+            "summary": backtest_state.get("summary"),
+            "last_error": backtest_state.get("last_error"),
+        },
+    }
+
+
+@app.get("/admin/backtest/dataset")
+async def get_backtest_dataset(
+    days_back: int = Query(default=30, ge=3, le=365),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    league: Optional[str] = Query(default=None),
+    max_matches: int = Query(default=300, ge=20, le=1000),
+    preview_limit: int = Query(default=100, ge=10, le=300),
+) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    window_start, window_end = _resolve_backtest_window(
+        start_date=start_date,
+        end_date=end_date,
+        days_back=days_back,
+    )
+    matches = _fetch_finished_matches_for_backtest(
+        client,
+        start_date=window_start,
+        end_date=window_end,
+        league_filter=league,
+        max_matches=max_matches,
+    )
+    match_ids = [str(item.get("id") or "") for item in matches if item.get("id")]
+    odds_match_ids: set[str] = set()
+    bookmaker = getattr(odds_scraper, "bookmaker_key", "betfair_exchange")
+
+    if match_ids:
+        try:
+            rows = (
+                client.table("odds_history")
+                .select("match_id")
+                .in_("match_id", match_ids)
+                .eq("bookmaker", bookmaker)
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+            odds_match_ids = {str(row.get("match_id") or "") for row in rows if row.get("match_id")}
+        except Exception:
+            odds_match_ids = set()
+
+    if len(odds_match_ids) < len(match_ids):
+        try:
+            rows = (
+                client.table("odds")
+                .select("match_id")
+                .in_("match_id", match_ids)
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+            odds_match_ids.update({str(row.get("match_id") or "") for row in rows if row.get("match_id")})
+        except Exception:
+            pass
+
+    team_ids = sorted(
+        {
+            str(item.get("home_team_id") or "")
+            for item in matches
+            if item.get("home_team_id")
+        }
+        | {
+            str(item.get("away_team_id") or "")
+            for item in matches
+            if item.get("away_team_id")
+        }
+    )
+    team_map: Dict[str, str] = {}
+    if team_ids:
+        try:
+            teams = client.table("teams").select("id,name").in_("id", team_ids).execute().data or []
+            team_map = {str(row.get("id")): str(row.get("name") or "") for row in teams}
+        except Exception:
+            team_map = {}
+
+    preview: List[Dict[str, Any]] = []
+    for row in matches[: max(1, preview_limit)]:
+        match_id = str(row.get("id") or "")
+        preview.append(
+            {
+                "match_id": match_id,
+                "match_date": row.get("match_date"),
+                "league": row.get("league"),
+                "home_team": team_map.get(str(row.get("home_team_id") or ""), "Ev Sahibi"),
+                "away_team": team_map.get(str(row.get("away_team_id") or ""), "Deplasman"),
+                "score": f"{int(row.get('ft_home', 0) or 0)}-{int(row.get('ft_away', 0) or 0)}",
+                "has_odds": match_id in odds_match_ids,
+            }
+        )
+
+    return {
+        "window": {
+            "start_date": window_start.isoformat(),
+            "end_date": window_end.isoformat(),
+            "days_back": int(days_back),
+        },
+        "league_filter": str(league or ""),
+        "total_matches_scanned": len(matches),
+        "matches_with_odds": len([match_id for match_id in match_ids if match_id in odds_match_ids]),
+        "preview_count": len(preview),
+        "preview": preview,
+    }
+
+
+@app.post("/admin/backtest/run")
+async def start_backtest_run(body: BacktestRunRequest) -> Dict[str, Any]:
+    global backtest_task
+    if backtest_task is not None and not backtest_task.done():
+        return {"status": "running", "message": "Backtest zaten calisiyor"}
+    backtest_task = asyncio.create_task(_run_backtest_lab(body))
+    return {
+        "status": "started",
+        "message": "Backtest arka planda baslatildi",
+        "params": body.model_dump(),
+    }
+
+
+@app.get("/admin/backtest/status")
+async def get_backtest_status() -> Dict[str, Any]:
+    task_running = backtest_task is not None and not backtest_task.done()
+    return {
+        "status": backtest_state.get("status"),
+        "running": backtest_state.get("running") or task_running,
+        "started_at": backtest_state.get("started_at"),
+        "finished_at": backtest_state.get("finished_at"),
+        "params": backtest_state.get("params"),
+        "processed": backtest_state.get("processed"),
+        "total_matches_scanned": backtest_state.get("total_matches_scanned"),
+        "success": backtest_state.get("success"),
+        "failed": backtest_state.get("failed"),
+        "skipped_no_odds": backtest_state.get("skipped_no_odds"),
+        "skipped_no_market": backtest_state.get("skipped_no_market"),
+        "summary": backtest_state.get("summary"),
+        "rows": backtest_state.get("rows") or [],
+        "last_error": backtest_state.get("last_error"),
     }
 
 

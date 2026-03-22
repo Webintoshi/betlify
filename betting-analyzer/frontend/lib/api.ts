@@ -268,6 +268,94 @@ export type CouponSelectionPayload = {
   ev_percentage: number;
 };
 
+export type BacktestDatasetPreviewRow = {
+  match_id: string;
+  match_date: string;
+  league: string;
+  home_team: string;
+  away_team: string;
+  score: string;
+  has_odds: boolean;
+};
+
+export type BacktestDatasetResponse = {
+  window: {
+    start_date: string;
+    end_date: string;
+    days_back: number;
+  };
+  league_filter: string;
+  total_matches_scanned: number;
+  matches_with_odds: number;
+  preview_count: number;
+  preview: BacktestDatasetPreviewRow[];
+};
+
+export type BacktestRunRequest = {
+  start_date?: string;
+  end_date?: string;
+  days_back?: number;
+  league?: string;
+  min_confidence?: number;
+  include_non_recommended?: boolean;
+  max_matches?: number;
+  store_rows?: number;
+};
+
+export type BacktestResultRow = {
+  match_id: string;
+  date: string;
+  league: string;
+  home_team: string;
+  away_team: string;
+  score: string;
+  our_market: string;
+  our_probability: number;
+  our_odd: number;
+  our_ev: number;
+  confidence_score: number;
+  recommended: boolean;
+  reject_reason?: string | null;
+  kelly_pct: number;
+  hit: boolean | null;
+  profit_units: number;
+  meta?: Record<string, unknown>;
+};
+
+export type BacktestStatusResponse = {
+  status: string;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  params: Record<string, unknown> | null;
+  processed: number;
+  total_matches_scanned: number;
+  success: number;
+  failed: number;
+  skipped_no_odds: number;
+  skipped_no_market: number;
+  summary: {
+    total_predictions: number;
+    evaluated_predictions: number;
+    hits: number;
+    misses: number;
+    unresolved: number;
+    hit_rate_pct: number;
+    avg_ev: number;
+    total_pnl_units: number;
+    roi_pct: number;
+    by_market: Array<{
+      market: string;
+      count: number;
+      hits: number;
+      misses: number;
+      hit_rate_pct: number;
+    }>;
+  } | null;
+  rows: BacktestResultRow[];
+  last_error: string | null;
+};
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BACKEND_URL}${path}`, {
     ...init,
@@ -342,4 +430,50 @@ export async function triggerFetchToday(): Promise<{ status: string; date: strin
 
 export async function triggerUpdateStats(): Promise<{ status: string }> {
   return fetchJson("/tasks/update-stats", { method: "POST" });
+}
+
+export async function getBacktestDataset(params: {
+  daysBack?: number;
+  startDate?: string;
+  endDate?: string;
+  league?: string;
+  maxMatches?: number;
+  previewLimit?: number;
+}): Promise<BacktestDatasetResponse> {
+  const search = new URLSearchParams();
+  if (typeof params.daysBack === "number") {
+    search.set("days_back", String(params.daysBack));
+  }
+  if (params.startDate) {
+    search.set("start_date", params.startDate);
+  }
+  if (params.endDate) {
+    search.set("end_date", params.endDate);
+  }
+  if (params.league) {
+    search.set("league", params.league);
+  }
+  if (typeof params.maxMatches === "number") {
+    search.set("max_matches", String(params.maxMatches));
+  }
+  if (typeof params.previewLimit === "number") {
+    search.set("preview_limit", String(params.previewLimit));
+  }
+  const query = search.toString();
+  return fetchJson<BacktestDatasetResponse>(`/admin/backtest/dataset${query ? `?${query}` : ""}`);
+}
+
+export async function startBacktestRun(payload: BacktestRunRequest): Promise<{
+  status: string;
+  message: string;
+  params: Record<string, unknown>;
+}> {
+  return fetchJson("/admin/backtest/run", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function getBacktestStatus(): Promise<BacktestStatusResponse> {
+  return fetchJson<BacktestStatusResponse>("/admin/backtest/status");
 }
