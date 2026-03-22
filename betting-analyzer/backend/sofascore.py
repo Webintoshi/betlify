@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -233,6 +234,178 @@ _TRACKED_COMPETITION_HINTS = {
     "scottish premiership",
     "ekstraklasa",
     "austrian bundesliga",
+}
+
+TEAM_OVERVIEW_STALE_HOURS = 24
+TEAM_OVERVIEW_MAX_TOURNAMENTS = 3
+TEAM_OVERVIEW_RECENT_LOOKBACK_DAYS = 60
+TEAM_OVERVIEW_NEXT_LOOKAHEAD_DAYS = 30
+
+OVERVIEW_STAT_LABELS = {
+    "averageRating": "Ortalama SofaScore Reytingi",
+    "avgRating": "Ortalama SofaScore Reytingi",
+    "sofascoreRating": "Ortalama SofaScore Reytingi",
+    "matches": "Maçlar",
+    "matchesPlayed": "Maçlar",
+    "goalsScored": "Atılan Gol",
+    "goalsConceded": "Yenilen Gol",
+    "assists": "Asist",
+    "cleanSheets": "Gol Yemeden",
+    "expectedGoals": "Beklenen Gol (xG)",
+    "averageBallPossession": "Topla Oynama",
+    "ballPossession": "Topla Oynama",
+    "goalsPerMatch": "Maç Başına Gol",
+    "penaltyGoals": "Penaltı Golü",
+    "freeKickGoals": "Serbest Vuruş Golü",
+    "goalsFromInsideTheBox": "Ceza Sahası İçinden Gol",
+    "goalsFromOutsideTheBox": "Ceza Sahası Dışından Gol",
+    "leftFootGoals": "Sol Ayak Golü",
+    "rightFootGoals": "Sağ Ayak Golü",
+    "headedGoals": "Kafa Golü",
+    "bigChances": "Maç Başına Büyük Şans",
+    "bigChancesMissed": "Maç Başına Kaçırılan Büyük Şans",
+    "shots": "Maç Başına Toplam Şut",
+    "shotsOnTarget": "Maç Başına İsabetli Şut",
+    "shotsOffTarget": "Maç Başına İsabetsiz Şut",
+    "blockedScoringAttempt": "Maç Başına Şut Engelleme",
+    "successfulDribbles": "Maç Başına Başarılı Top Sürme",
+    "corners": "Maç Başına Korner",
+    "freeKickShots": "Maç Başına Serbest Vuruş",
+    "hitWoodwork": "Direkten Dönen Şut",
+    "fastBreaks": "Kontratak",
+    "totalPasses": "Toplam Pas",
+    "accuratePasses": "İsabetli Pas",
+    "accuratePassesPercentage": "Pas İsabeti",
+    "totalOwnHalfPasses": "Kendi Yarı Alan Pası",
+    "accurateOwnHalfPasses": "İsabetli Kendi Yarı Alan Pası",
+    "accurateOwnHalfPassesPercentage": "Kendi Yarı Alan Pas İsabeti",
+    "totalOppositionHalfPasses": "Rakip Yarı Alan Pası",
+    "accurateOppositionHalfPasses": "İsabetli Rakip Yarı Alan Pası",
+    "accurateOppositionHalfPassesPercentage": "Rakip Yarı Alan Pas İsabeti",
+    "totalLongBalls": "Uzun Top",
+    "accurateLongBalls": "İsabetli Uzun Top",
+    "accurateLongBallsPercentage": "Uzun Top İsabeti",
+    "totalCrosses": "Orta",
+    "accurateCrosses": "İsabetli Orta",
+    "accurateCrossesPercentage": "Orta İsabeti",
+    "totalThroughBalls": "Ara Pas",
+    "accurateThroughBalls": "İsabetli Ara Pas",
+    "accurateThroughBallsPercentage": "Ara Pas İsabeti",
+    "tackles": "Top Kapma",
+    "interceptions": "Araya Girme",
+    "clearances": "Uzaklaştırma",
+    "blockedShots": "Bloklanan Şut",
+    "saves": "Kurtarış",
+    "ballRecoveries": "Top Kazanma",
+    "recoveries": "Top Kazanma",
+    "totalDuels": "Toplam İkili Mücadele",
+    "duelsWon": "Kazanılan İkili Mücadele",
+    "duelsWonPercentage": "İkili Mücadele Kazanma %",
+    "errorsLeadingToGoal": "Gole Yol Açan Hata",
+    "errorsLeadingToShot": "Şuta Yol Açan Hata",
+    "fouls": "Faul",
+    "offsides": "Ofsayt",
+    "yellowCards": "Sarı Kart",
+    "redCards": "Kırmızı Kart",
+    "throwIns": "Taç",
+}
+
+OVERVIEW_SUMMARY_KEYS = {
+    "averagerating",
+    "avgrating",
+    "sofascorerating",
+    "rating",
+    "matches",
+    "matchesplayed",
+    "gamesplayed",
+    "played",
+    "goalsscored",
+    "goalsconceded",
+    "assists",
+    "cleansheets",
+    "expectedgoals",
+    "xg",
+    "expectedgoalsfor",
+    "xgfor",
+    "averageballpossession",
+    "ballpossession",
+    "possession",
+}
+
+OVERVIEW_ATTACK_KEYS = {
+    "goalspermatch",
+    "penaltygoals",
+    "freekickgoals",
+    "goalsfrominsidethebox",
+    "goalsfromoutsidethebox",
+    "shotsfrominsidethebox",
+    "shotsfromoutsidethebox",
+    "leftfootgoals",
+    "rightfootgoals",
+    "headedgoals",
+    "bigchances",
+    "bigchancescreated",
+    "bigchancesmissed",
+    "shots",
+    "shotstotal",
+    "shotsontarget",
+    "shotsofftarget",
+    "blockedscoringattempt",
+    "successfuldribbles",
+    "dribbleattempts",
+    "corners",
+    "freekickshots",
+    "hitwoodwork",
+    "fastbreaks",
+    "fastbreakgoals",
+    "fastbreakshots",
+    "counterattacks",
+}
+
+OVERVIEW_PASSING_KEYS = {
+    "totalpasses",
+    "accuratepasses",
+    "accuratepassespercentage",
+    "totalownhalfpasses",
+    "accurateownhalfpasses",
+    "accurateownhalfpassespercentage",
+    "totaloppositionhalfpasses",
+    "accurateoppositionhalfpasses",
+    "accurateoppositionhalfpassespercentage",
+    "totallongballs",
+    "accuratelongballs",
+    "accuratelongballspercentage",
+    "totalcrosses",
+    "accuratecrosses",
+    "accuratecrossespercentage",
+    "totalthroughballs",
+    "accuratethroughballs",
+    "accuratethroughballspercentage",
+}
+
+OVERVIEW_DEFENDING_KEYS = {
+    "tackles",
+    "interceptions",
+    "clearances",
+    "clearancesoffline",
+    "lastmantackles",
+    "blockedshots",
+    "saves",
+    "ballrecoveries",
+    "recoveries",
+    "totalduels",
+    "duelswon",
+    "duelswonpercentage",
+    "totalgroundduels",
+    "groundduelswon",
+    "groundduelswonpercentage",
+    "totalaerialduels",
+    "aerialduelswon",
+    "aerialduelswonpercentage",
+    "errorsleadingtogoal",
+    "errorsleadingtoshot",
+    "penaltiescommited",
+    "penaltygoalsconceded",
 }
 
 
@@ -573,10 +746,14 @@ class SofaScoreService:
     def _get_team_row(self, team_id: str) -> Optional[Dict[str, Any]]:
         if self.supabase is None or not team_id:
             return None
+        select_columns = "id,name,league,country,sofascore_id,api_team_id,logo_url,coach_name,created_at"
+        for column in ["team_data_sync_status", "team_data_last_fetched_at", "team_data_last_error"]:
+            if self._has_column("teams", column):
+                select_columns += f",{column}"
         try:
             result = (
                 self.supabase.table("teams")
-                .select("id,name,league,country,sofascore_id,api_team_id,logo_url,coach_name,created_at")
+                .select(select_columns)
                 .eq("id", team_id)
                 .limit(1)
                 .execute()
@@ -1031,6 +1208,114 @@ class SofaScoreService:
                     team_sofascore_id,
                 )
         return saved
+
+    def _update_team_overview_sync_state(
+        self,
+        team_id: str,
+        *,
+        status: str,
+        error: str = "",
+        fetched_at: Optional[str] = None,
+    ) -> None:
+        if self.supabase is None or not team_id:
+            return
+        payload: Dict[str, Any] = {}
+        if self._has_column("teams", "team_data_sync_status"):
+            payload["team_data_sync_status"] = status
+        if self._has_column("teams", "team_data_last_error"):
+            payload["team_data_last_error"] = error or None
+        if fetched_at and self._has_column("teams", "team_data_last_fetched_at"):
+            payload["team_data_last_fetched_at"] = fetched_at
+        if not payload:
+            return
+        try:
+            self.supabase.table("teams").update(payload).eq("id", team_id).execute()
+        except Exception:
+            logger.exception("team overview sync state update failed. team_id=%s status=%s", team_id, status)
+
+    def _upsert_team_overview_cache(
+        self,
+        *,
+        team_id: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        if self.supabase is None or not team_id:
+            return False
+        if not self._has_column("team_overview_cache", "team_id"):
+            return False
+
+        row = {
+            "team_id": team_id,
+            "team_sofascore_id": _safe_int(payload.get("team_sofascore_id")),
+            "tournament_id": _safe_int(payload.get("tournament_id")),
+            "season_id": _safe_int(payload.get("season_id")),
+            "tournament_name": str(payload.get("tournament_name") or ""),
+            "season_name": str(payload.get("season_name") or ""),
+            "last_five_matches": payload.get("last_five_matches") or [],
+            "form_last_ten": payload.get("form_last_ten") or {},
+            "summary_stats": payload.get("summary_stats") or {},
+            "attack_stats": payload.get("attack_stats") or {},
+            "passing_stats": payload.get("passing_stats") or {},
+            "defending_stats": payload.get("defending_stats") or {},
+            "other_stats": payload.get("other_stats") or {},
+            "raw_statistics_payload": payload.get("raw_statistics_payload") or {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if row["team_sofascore_id"] <= 0 or row["tournament_id"] <= 0 or row["season_id"] <= 0:
+            return False
+        try:
+            self.supabase.table("team_overview_cache").upsert(
+                row,
+                on_conflict="team_id,tournament_id,season_id",
+            ).execute()
+            return True
+        except Exception:
+            logger.exception(
+                "team_overview_cache upsert failed. team_id=%s tournament_id=%s season_id=%s",
+                team_id,
+                row["tournament_id"],
+                row["season_id"],
+            )
+            return False
+
+    def _upsert_team_overview_snapshot(
+        self,
+        *,
+        team_id: str,
+        payload: Dict[str, Any],
+        snapshot_date: Optional[str] = None,
+    ) -> bool:
+        if self.supabase is None or not team_id:
+            return False
+        if not self._has_column("team_overview_daily_snapshots", "team_id"):
+            return False
+
+        snapshot_day = str(snapshot_date or datetime.now(timezone.utc).date().isoformat())
+        row = {
+            "snapshot_date": snapshot_day,
+            "team_id": team_id,
+            "team_sofascore_id": _safe_int(payload.get("team_sofascore_id")),
+            "tournament_id": _safe_int(payload.get("tournament_id")),
+            "season_id": _safe_int(payload.get("season_id")),
+            "payload": payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if row["team_sofascore_id"] <= 0 or row["tournament_id"] <= 0 or row["season_id"] <= 0:
+            return False
+        try:
+            self.supabase.table("team_overview_daily_snapshots").upsert(
+                row,
+                on_conflict="snapshot_date,team_id,tournament_id,season_id",
+            ).execute()
+            return True
+        except Exception:
+            logger.exception(
+                "team_overview_daily_snapshots upsert failed. team_id=%s tournament_id=%s season_id=%s",
+                team_id,
+                row["tournament_id"],
+                row["season_id"],
+            )
+            return False
 
     async def sync_match_sofascore_bundle(self, match_id: str, force: bool = False) -> Dict[str, Any]:
         if self.supabase is None:
@@ -2303,6 +2588,425 @@ class SofaScoreService:
         walk(payload)
         return rows
 
+    @staticmethod
+    def _humanize_stat_label(key: str) -> str:
+        text = str(key or "").strip()
+        if not text:
+            return ""
+        mapped = OVERVIEW_STAT_LABELS.get(text)
+        if mapped:
+            return mapped
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+        text = text.replace("_", " ").replace("-", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:1].upper() + text[1:] if text else ""
+
+    @staticmethod
+    def _normalize_overview_stat_value(value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            rounded = round(float(value), 3)
+            if rounded.is_integer():
+                return int(rounded)
+            return rounded
+        parsed = _safe_float(value, fallback=float("nan"))
+        if parsed == parsed:
+            rounded = round(float(parsed), 3)
+            if rounded.is_integer():
+                return int(rounded)
+            return rounded
+        return value
+
+    def _overview_stat_category(self, raw_key: str) -> str:
+        key = self._normalize_stat_key(raw_key)
+        if key in OVERVIEW_SUMMARY_KEYS:
+            return "summary"
+        if key in OVERVIEW_PASSING_KEYS or "pass" in key or "cross" in key or "throughball" in key or "longball" in key:
+            return "passing"
+        if key in OVERVIEW_DEFENDING_KEYS or "tackle" in key or "interception" in key or "clearance" in key or "save" in key or "duel" in key or "recover" in key:
+            return "defending"
+        if key in OVERVIEW_ATTACK_KEYS or "goal" in key or "shot" in key or "chance" in key or "dribble" in key or "corner" in key or "freekick" in key or "woodwork" in key or "fastbreak" in key or "counter" in key:
+            return "attack"
+        return "other"
+
+    def _categorize_team_overview_statistics(self, stats: Dict[str, Any]) -> Dict[str, Any]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {
+            "summary": [],
+            "attack": [],
+            "passing": [],
+            "defending": [],
+            "other": [],
+        }
+        values_map: Dict[str, Dict[str, Any]] = {
+            "summary": {},
+            "attack": {},
+            "passing": {},
+            "defending": {},
+            "other": {},
+        }
+
+        for raw_key, raw_value in stats.items():
+            if isinstance(raw_value, (dict, list)):
+                continue
+            category = self._overview_stat_category(str(raw_key))
+            normalized_value = self._normalize_overview_stat_value(raw_value)
+            entry = {
+                "key": str(raw_key),
+                "label": self._humanize_stat_label(str(raw_key)),
+                "value": normalized_value,
+            }
+            grouped[category].append(entry)
+            values_map[category][str(raw_key)] = normalized_value
+
+        return {
+            "summary_stats": {"items": grouped["summary"], "values": values_map["summary"]},
+            "attack_stats": {"items": grouped["attack"], "values": values_map["attack"]},
+            "passing_stats": {"items": grouped["passing"], "values": values_map["passing"]},
+            "defending_stats": {"items": grouped["defending"], "values": values_map["defending"]},
+            "other_stats": {"items": grouped["other"], "values": values_map["other"]},
+        }
+
+    def _normalize_team_season_statistics_from_stats(
+        self,
+        *,
+        team_id: int,
+        tournament_id: int,
+        season_id: int,
+        stats: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        matches_played = int(
+            round(
+                float(
+                    self._find_numeric_value(
+                        stats,
+                        ["matches", "matchesPlayed", "gamesPlayed", "played", "appearances"],
+                    )
+                    or 0.0
+                )
+            )
+        )
+        goals_for = float(self._find_numeric_value(stats, ["goalsScored", "goalsFor", "scoresFor"]) or 0.0)
+        goals_against = float(self._find_numeric_value(stats, ["goalsConceded", "goalsAgainst", "scoresAgainst"]) or 0.0)
+        assists = float(self._find_numeric_value(stats, ["assists"]) or 0.0)
+        clean_sheets = float(self._find_numeric_value(stats, ["cleanSheets", "cleanSheet"]) or 0.0)
+        expected_goals_raw = float(
+            self._find_numeric_value(
+                stats,
+                ["expectedGoals", "xg", "expectedGoalsFor", "xgFor"],
+            )
+            or 0.0
+        )
+        shots_on_target_total = float(
+            self._find_numeric_value(
+                stats,
+                ["shotsOnTarget", "sot", "shotsOnTargetTotal"],
+            )
+            or 0.0
+        )
+        big_chances_total = float(
+            self._find_numeric_value(
+                stats,
+                ["bigChances", "bigChancesCreated"],
+            )
+            or 0.0
+        )
+        possession = float(
+            self._find_numeric_value(
+                stats,
+                ["averageBallPossession", "ballPossession", "possession"],
+            )
+            or 0.0
+        )
+        avg_rating = float(
+            self._find_numeric_value(
+                stats,
+                ["avgRating", "averageRating", "sofascoreRating", "rating"],
+            )
+            or 0.0
+        )
+        per_match_divisor = float(matches_played) if matches_played > 0 else 1.0
+        expected_goals = (
+            expected_goals_raw / per_match_divisor
+            if expected_goals_raw > 0 and expected_goals_raw > 5.0 and matches_played > 0
+            else expected_goals_raw
+        )
+        if expected_goals <= 0 and matches_played > 0 and goals_for > 0:
+            expected_goals = goals_for / per_match_divisor
+
+        return {
+            "team_sofascore_id": team_id,
+            "tournament_id": tournament_id,
+            "season_id": season_id,
+            "matches_played": matches_played,
+            "goals_for": round(goals_for, 3),
+            "goals_against": round(goals_against, 3),
+            "goals_per_match": round(goals_for / per_match_divisor, 3),
+            "goals_conceded_per_match": round(goals_against / per_match_divisor, 3),
+            "clean_sheets": int(round(clean_sheets)),
+            "assists": int(round(assists)),
+            "expected_goals": round(expected_goals, 3),
+            "shots_on_target": round(shots_on_target_total / per_match_divisor, 3),
+            "big_chances": round(big_chances_total / per_match_divisor, 3),
+            "possession": round(possession, 3),
+            "avg_rating": round(avg_rating, 3),
+        }
+
+    @staticmethod
+    def build_team_form(last_matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+        finished = [row for row in last_matches if str(row.get("result") or "") in {"W", "D", "L"}][:10]
+        results = [str(row.get("result") or "") for row in finished]
+        points = sum(3 if result == "W" else 1 if result == "D" else 0 for result in results)
+        wins = sum(1 for result in results if result == "W")
+        draws = sum(1 for result in results if result == "D")
+        losses = sum(1 for result in results if result == "L")
+        max_points = max(1, len(results) * 3)
+        return {
+            "results": results,
+            "points": points,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "score_pct": round(points / max_points, 4),
+        }
+
+    def _parse_overview_datetime(self, raw_value: Any) -> datetime:
+        text = str(raw_value or "").strip()
+        if not text:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _list_priority_team_ids(self) -> set[str]:
+        if self.supabase is None:
+            return set()
+        team_ids: set[str] = set()
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=14)).isoformat()
+        end = (now + timedelta(days=14)).isoformat()
+        try:
+            rows: List[Dict[str, Any]] = []
+            batch_size = 1000
+            start_index = 0
+            while start_index < 20000:
+                end_index = start_index + batch_size - 1
+                batch = (
+                    self.supabase.table("matches")
+                    .select("home_team_id,away_team_id")
+                    .gte("match_date", start)
+                    .lte("match_date", end)
+                    .range(start_index, end_index)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not batch:
+                    break
+                rows.extend(batch)
+                if len(batch) < batch_size:
+                    break
+                start_index += batch_size
+            for row in rows:
+                for key in ("home_team_id", "away_team_id"):
+                    value = str(row.get(key) or "").strip()
+                    if value:
+                        team_ids.add(value)
+        except Exception:
+            logger.exception("priority team match window query failed.")
+        return team_ids
+
+    def _list_overview_candidate_teams(self, *, priority_only: bool = False) -> List[Dict[str, Any]]:
+        if self.supabase is None:
+            return []
+        select_columns = "id,name,league,country,sofascore_id"
+        for column in ["team_data_sync_status", "team_data_last_fetched_at", "team_data_last_error"]:
+            if self._has_column("teams", column):
+                select_columns += f",{column}"
+        try:
+            rows: List[Dict[str, Any]] = []
+            batch_size = 1000
+            start_index = 0
+            while start_index < 20000:
+                end_index = start_index + batch_size - 1
+                batch = (
+                    self.supabase.table("teams")
+                    .select(select_columns)
+                    .not_.is_("sofascore_id", "null")
+                    .order("id")
+                    .range(start_index, end_index)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not batch:
+                    break
+                rows.extend(batch)
+                if len(batch) < batch_size:
+                    break
+                start_index += batch_size
+        except Exception:
+            logger.exception("team overview candidate query failed.")
+            return []
+
+        priority_team_ids = self._list_priority_team_ids() if priority_only else set()
+        tracked_leagues = {
+            _normalize_competition_name(_canonical_league_name(name))
+            for name in [*TRACKED_LEAGUES.values(), *SOFASCORE_TOURNAMENT_IDS.values()]
+        }
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            team_id = str(row.get("id") or "").strip()
+            sofascore_team_id = _safe_int(row.get("sofascore_id"))
+            if not team_id or sofascore_team_id <= 0:
+                continue
+            if priority_only:
+                league_name = _normalize_competition_name(_canonical_league_name(row.get("league")))
+                if team_id not in priority_team_ids and league_name not in tracked_leagues:
+                    continue
+            candidates.append(row)
+
+        candidates.sort(
+            key=lambda row: (
+                0 if not str(row.get("team_data_last_fetched_at") or "").strip() else 1,
+                self._parse_overview_datetime(row.get("team_data_last_fetched_at")),
+                str(row.get("name") or ""),
+            )
+        )
+        return candidates
+
+    async def _collect_team_tournament_candidates(
+        self,
+        *,
+        team_id: str,
+        sofascore_team_id: int,
+    ) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        seen: set[Tuple[int, int]] = set()
+
+        def push_candidate(
+            tournament_id: int,
+            season_id: int,
+            *,
+            tournament_name: str = "",
+            season_name: str = "",
+            source: str = "",
+            rank: int = 99,
+            source_updated_at: str = "",
+        ) -> None:
+            if tournament_id <= 0 or season_id <= 0:
+                return
+            key = (int(tournament_id), int(season_id))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "tournament_id": int(tournament_id),
+                    "season_id": int(season_id),
+                    "tournament_name": str(tournament_name or ""),
+                    "season_name": str(season_name or season_id),
+                    "source": str(source or ""),
+                    "rank": int(rank),
+                    "source_updated_at": str(source_updated_at or ""),
+                }
+            )
+
+        profile_row = self._get_cached_team_profile_row(team_id=team_id, sofascore_team_id=sofascore_team_id) or {}
+        profile_payload = profile_row.get("payload") if isinstance(profile_row.get("payload"), dict) else {}
+        team_payload = profile_payload.get("team") if isinstance(profile_payload.get("team"), dict) else {}
+        primary_tournament = (
+            team_payload.get("primaryUniqueTournament")
+            if isinstance(team_payload.get("primaryUniqueTournament"), dict)
+            else {}
+        )
+        primary_tournament_id = _safe_int(primary_tournament.get("id"))
+        if primary_tournament_id > 0:
+            primary_season_id = await self.get_latest_tournament_season_id(primary_tournament_id) or 0
+            push_candidate(
+                primary_tournament_id,
+                primary_season_id,
+                tournament_name=str(primary_tournament.get("name") or ""),
+                season_name=str(primary_season_id or ""),
+                source="profile_primary",
+                rank=0,
+                source_updated_at=str(profile_row.get("updated_at") or ""),
+            )
+
+        if self.supabase is not None and self._has_column("league_standings_cache", "team_id"):
+            try:
+                standings_rows = (
+                    self.supabase.table("league_standings_cache")
+                    .select("tournament_id,season_id,updated_at")
+                    .eq("team_id", team_id)
+                    .order("updated_at", desc=True)
+                    .limit(20)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                standings_rows = []
+            for row in standings_rows:
+                push_candidate(
+                    _safe_int(row.get("tournament_id")),
+                    _safe_int(row.get("season_id")),
+                    source="standings_cache",
+                    rank=1,
+                    source_updated_at=str(row.get("updated_at") or ""),
+                )
+
+        now = datetime.now(timezone.utc)
+        lookback_cutoff = now - timedelta(days=TEAM_OVERVIEW_RECENT_LOOKBACK_DAYS)
+        lookahead_cutoff = now + timedelta(days=TEAM_OVERVIEW_NEXT_LOOKAHEAD_DAYS)
+        event_endpoints = [f"/team/{sofascore_team_id}/events/last/0", f"/team/{sofascore_team_id}/events/next/0"]
+        for endpoint in event_endpoints:
+            payload = await self._request(endpoint, ttl_seconds=3600)
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            if not isinstance(events, list):
+                continue
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                timestamp = _safe_int(event.get("startTimestamp"))
+                event_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp > 0 else None
+                if event_dt is None:
+                    continue
+                if endpoint.endswith("/last/0") and event_dt < lookback_cutoff:
+                    continue
+                if endpoint.endswith("/next/0") and event_dt > lookahead_cutoff:
+                    continue
+                tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
+                unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+                season = event.get("season", {}) if isinstance(event.get("season"), dict) else {}
+                tournament_id = _safe_int(unique.get("id") or tournament.get("id"))
+                season_id = _safe_int(season.get("id") or season.get("year"))
+                push_candidate(
+                    tournament_id,
+                    season_id,
+                    tournament_name=str(unique.get("name") or tournament.get("name") or ""),
+                    season_name=str(season.get("name") or season.get("year") or season_id),
+                    source="team_events",
+                    rank=3,
+                    source_updated_at=event_dt.isoformat(),
+                )
+
+        candidates.sort(
+            key=lambda row: (
+                int(row.get("rank", 99)),
+                0 if row.get("source") == "profile_primary" else 1,
+                -self._parse_overview_datetime(row.get("source_updated_at")).timestamp(),
+                str(row.get("tournament_name") or ""),
+            )
+        )
+        return candidates[:TEAM_OVERVIEW_MAX_TOURNAMENTS]
+
     async def get_team_halftime_statistics(
         self,
         team_id: str,
@@ -2450,88 +3154,70 @@ class SofaScoreService:
         stats = payload.get("statistics", {}) if isinstance(payload, dict) else {}
         if not isinstance(stats, dict) or not stats:
             return {}
-
-        matches_played = int(
-            round(
-                float(
-                    self._find_numeric_value(
-                        stats,
-                        ["matches", "matchesPlayed", "gamesPlayed", "played", "appearances"],
-                    )
-                    or 0.0
-                )
-            )
+        normalized = self._normalize_team_season_statistics_from_stats(
+            team_id=team_id,
+            tournament_id=tournament_id,
+            season_id=season_id,
+            stats=stats,
         )
-        goals_for = float(self._find_numeric_value(stats, ["goalsScored", "goalsFor", "scoresFor"]) or 0.0)
-        goals_against = float(self._find_numeric_value(stats, ["goalsConceded", "goalsAgainst", "scoresAgainst"]) or 0.0)
-        assists = float(self._find_numeric_value(stats, ["assists"]) or 0.0)
-        clean_sheets = float(self._find_numeric_value(stats, ["cleanSheets", "cleanSheet"]) or 0.0)
-        expected_goals_raw = float(
-            self._find_numeric_value(
-                stats,
-                ["expectedGoals", "xg", "expectedGoalsFor", "xgFor"],
-            )
-            or 0.0
-        )
-        shots_on_target_total = float(
-            self._find_numeric_value(
-                stats,
-                ["shotsOnTarget", "sot", "shotsOnTargetTotal"],
-            )
-            or 0.0
-        )
-        big_chances_total = float(
-            self._find_numeric_value(
-                stats,
-                ["bigChances", "bigChancesCreated"],
-            )
-            or 0.0
-        )
-        possession = float(
-            self._find_numeric_value(
-                stats,
-                ["averageBallPossession", "ballPossession", "possession"],
-            )
-            or 0.0
-        )
-        avg_rating = float(
-            self._find_numeric_value(
-                stats,
-                ["avgRating", "averageRating", "sofascoreRating", "rating"],
-            )
-            or 0.0
-        )
-
-        per_match_divisor = float(matches_played) if matches_played > 0 else 1.0
-        expected_goals = (
-            expected_goals_raw / per_match_divisor
-            if expected_goals_raw > 0 and expected_goals_raw > 5.0 and matches_played > 0
-            else expected_goals_raw
-        )
-        if expected_goals <= 0 and matches_played > 0 and goals_for > 0:
-            expected_goals = goals_for / per_match_divisor
-
-        normalized = {
-            "team_sofascore_id": team_id,
-            "tournament_id": tournament_id,
-            "season_id": season_id,
-            "matches_played": matches_played,
-            "goals_for": round(goals_for, 3),
-            "goals_against": round(goals_against, 3),
-            "goals_per_match": round(goals_for / per_match_divisor, 3),
-            "goals_conceded_per_match": round(goals_against / per_match_divisor, 3),
-            "clean_sheets": int(round(clean_sheets)),
-            "assists": int(round(assists)),
-            "expected_goals": round(expected_goals, 3),
-            "shots_on_target": round(shots_on_target_total / per_match_divisor, 3),
-            "big_chances": round(big_chances_total / per_match_divisor, 3),
-            "possession": round(possession, 3),
-            "avg_rating": round(avg_rating, 3),
-        }
         team_uuid = self._resolve_team_uuid_by_sofascore_id(team_id)
         if team_uuid:
             self._upsert_team_season_stats_cache(team_id=team_uuid, payload=normalized)
         return normalized
+
+    async def get_team_overview_statistics(
+        self,
+        team_sofascore_id: int,
+        tournament_id: int,
+        season_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        if team_sofascore_id <= 0 or tournament_id <= 0 or season_id <= 0:
+            return None
+        payload = await self._request(
+            f"/team/{team_sofascore_id}/unique-tournament/{tournament_id}/season/{season_id}/statistics/overall",
+            ttl_seconds=3600,
+        )
+        if payload is None:
+            return None
+
+        stats = payload.get("statistics", {}) if isinstance(payload, dict) else {}
+        if not isinstance(stats, dict) or not stats:
+            return {
+                "team_sofascore_id": team_sofascore_id,
+                "tournament_id": tournament_id,
+                "season_id": season_id,
+                "summary_stats": {"items": [], "values": {}},
+                "attack_stats": {"items": [], "values": {}},
+                "passing_stats": {"items": [], "values": {}},
+                "defending_stats": {"items": [], "values": {}},
+                "other_stats": {"items": [], "values": {}},
+                "raw_statistics_payload": payload if isinstance(payload, dict) else {},
+                "normalized_season_stats": {},
+            }
+
+        categorized = self._categorize_team_overview_statistics(stats)
+        normalized = self._normalize_team_season_statistics_from_stats(
+            team_id=team_sofascore_id,
+            tournament_id=tournament_id,
+            season_id=season_id,
+            stats=stats,
+        )
+        team_uuid = self._resolve_team_uuid_by_sofascore_id(team_sofascore_id)
+        if team_uuid:
+            self._upsert_team_season_stats_cache(team_id=team_uuid, payload=normalized)
+
+        return {
+            "team_sofascore_id": team_sofascore_id,
+            "tournament_id": tournament_id,
+            "season_id": season_id,
+            "summary_stats": categorized["summary_stats"],
+            "attack_stats": categorized["attack_stats"],
+            "passing_stats": categorized["passing_stats"],
+            "defending_stats": categorized["defending_stats"],
+            "other_stats": categorized["other_stats"],
+            "raw_statistics_payload": payload if isinstance(payload, dict) else {},
+            "normalized_season_stats": normalized,
+        }
 
     async def get_tournament_standings(
         self,
@@ -3139,6 +3825,200 @@ class SofaScoreService:
             )
         return rows
 
+    async def resolve_team_active_tournaments(self, team_id: str, sofascore_team_id: int) -> List[Dict[str, Any]]:
+        if not team_id or sofascore_team_id <= 0:
+            return []
+        return await self._collect_team_tournament_candidates(
+            team_id=team_id,
+            sofascore_team_id=sofascore_team_id,
+        )
+
+    async def sync_team_overview(
+        self,
+        team_id: str,
+        sofascore_team_id: int,
+        force: bool = False,
+        priority_only: bool = False,
+    ) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"updated": False, "reason": "supabase_unavailable"}
+        if not team_id or sofascore_team_id <= 0:
+            return {"updated": False, "reason": "invalid_team"}
+
+        team_row = self._get_team_row(team_id) or {}
+        last_fetched_raw = str(team_row.get("team_data_last_fetched_at") or "")
+        if not force and last_fetched_raw:
+            last_fetched = self._parse_overview_datetime(last_fetched_raw)
+            if (datetime.now(timezone.utc) - last_fetched) < timedelta(hours=TEAM_OVERVIEW_STALE_HOURS):
+                return {"updated": False, "reason": "fresh_cache", "team_id": team_id}
+
+        self._update_team_overview_sync_state(team_id, status="running", error="")
+
+        recent_matches = await self.get_team_recent_matches(sofascore_team_id, limit=10)
+        last_five_matches = recent_matches[:5]
+        form_last_ten = self.build_team_form(recent_matches[:10])
+        tournaments = await self.resolve_team_active_tournaments(team_id, sofascore_team_id)
+        started_at_iso = datetime.now(timezone.utc).isoformat()
+        if priority_only and not tournaments:
+            self._update_team_overview_sync_state(
+                team_id,
+                status="failed",
+                error="no_active_tournaments",
+                fetched_at=started_at_iso,
+            )
+            return {"updated": False, "reason": "no_active_tournaments", "team_id": team_id}
+        if not tournaments:
+            self._update_team_overview_sync_state(
+                team_id,
+                status="failed",
+                error="no_active_tournaments",
+                fetched_at=started_at_iso,
+            )
+            return {"updated": False, "reason": "no_active_tournaments", "team_id": team_id}
+
+        updated_rows = 0
+        failed_rows = 0
+        last_payloads: List[Dict[str, Any]] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        snapshot_day = datetime.now(timezone.utc).date().isoformat()
+
+        for tournament in tournaments[:TEAM_OVERVIEW_MAX_TOURNAMENTS]:
+            tournament_id = _safe_int(tournament.get("tournament_id"))
+            season_id = _safe_int(tournament.get("season_id"))
+            if tournament_id <= 0 or season_id <= 0:
+                continue
+
+            overview_stats = await self.get_team_overview_statistics(sofascore_team_id, tournament_id, season_id)
+            if overview_stats is None:
+                failed_rows += 1
+                continue
+
+            cache_payload = {
+                "team_id": team_id,
+                "team_sofascore_id": sofascore_team_id,
+                "tournament_id": tournament_id,
+                "season_id": season_id,
+                "tournament_name": str(tournament.get("tournament_name") or ""),
+                "season_name": str(tournament.get("season_name") or season_id),
+                "last_five_matches": last_five_matches,
+                "form_last_ten": form_last_ten,
+                "summary_stats": overview_stats.get("summary_stats") or {},
+                "attack_stats": overview_stats.get("attack_stats") or {},
+                "passing_stats": overview_stats.get("passing_stats") or {},
+                "defending_stats": overview_stats.get("defending_stats") or {},
+                "other_stats": overview_stats.get("other_stats") or {},
+                "raw_statistics_payload": overview_stats.get("raw_statistics_payload") or {},
+                "updated_at": now_iso,
+            }
+            if self._upsert_team_overview_cache(team_id=team_id, payload=cache_payload):
+                updated_rows += 1
+                self._upsert_team_overview_snapshot(
+                    team_id=team_id,
+                    payload=cache_payload,
+                    snapshot_date=snapshot_day,
+                )
+                last_payloads.append(cache_payload)
+            else:
+                failed_rows += 1
+
+        if updated_rows > 0:
+            self._update_team_overview_sync_state(team_id, status="ready", error="", fetched_at=now_iso)
+        else:
+            self._update_team_overview_sync_state(
+                team_id,
+                status="failed",
+                error="no_overview_rows",
+                fetched_at=now_iso,
+            )
+
+        return {
+            "updated": updated_rows > 0,
+            "team_id": team_id,
+            "team_sofascore_id": sofascore_team_id,
+            "processed_tournaments": len(tournaments[:TEAM_OVERVIEW_MAX_TOURNAMENTS]),
+            "updated_rows": updated_rows,
+            "failed_rows": failed_rows,
+            "last_five_matches_count": len(last_five_matches),
+            "form_last_ten": form_last_ten,
+            "tournaments": [
+                {
+                    "tournament_id": row.get("tournament_id"),
+                    "season_id": row.get("season_id"),
+                    "tournament_name": row.get("tournament_name"),
+                    "season_name": row.get("season_name"),
+                }
+                for row in last_payloads
+            ],
+        }
+
+    async def refresh_team_overviews(
+        self,
+        *,
+        force: bool = False,
+        limit: int = 0,
+        priority_only: bool = False,
+    ) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed": 0, "updated": 0, "failed": 0, "skipped": True, "reason": "supabase_unavailable"}
+
+        candidates = self._list_overview_candidate_teams(priority_only=priority_only)
+        processed = 0
+        updated = 0
+        failed = 0
+        skipped = 0
+        errors: List[Dict[str, Any]] = []
+        safe_limit = max(0, int(limit or 0))
+
+        for row in candidates:
+            team_id = str(row.get("id") or "").strip()
+            sofascore_team_id = _safe_int(row.get("sofascore_id"))
+            if not team_id or sofascore_team_id <= 0:
+                continue
+            if safe_limit > 0 and processed >= safe_limit:
+                break
+
+            processed += 1
+            try:
+                result = await self.sync_team_overview(
+                    team_id,
+                    sofascore_team_id,
+                    force=force,
+                    priority_only=priority_only,
+                )
+            except Exception as exc:
+                logger.exception("team overview sync failed. team_id=%s sofascore_team_id=%s", team_id, sofascore_team_id)
+                failed += 1
+                self._update_team_overview_sync_state(
+                    team_id,
+                    status="failed",
+                    error=str(exc)[:500],
+                    fetched_at=datetime.now(timezone.utc).isoformat(),
+                )
+                errors.append({"team_id": team_id, "error": str(exc)})
+                await asyncio.sleep(0.5)
+                continue
+
+            if result.get("updated"):
+                updated += 1
+            elif result.get("reason") in {"fresh_cache"}:
+                skipped += 1
+            else:
+                failed += 1
+                if result.get("reason"):
+                    errors.append({"team_id": team_id, "error": str(result.get("reason"))})
+            await asyncio.sleep(0.5)
+
+        pending_remaining = len(self._list_overview_candidate_teams(priority_only=priority_only))
+        return {
+            "processed": processed,
+            "updated": updated,
+            "failed": failed,
+            "skipped": skipped,
+            "priority_only": bool(priority_only),
+            "pending_remaining": pending_remaining,
+            "errors": errors[:25],
+        }
+
     async def get_match_injuries(self, sofascore_event_id: int) -> Optional[Dict[str, List[Dict[str, Any]]]]:
         payload = await self._request(f"/event/{sofascore_event_id}/lineups", ttl_seconds=300)
         if payload is None:
@@ -3680,6 +4560,49 @@ async def get_team_season_statistics(
     season_id: int,
 ) -> Optional[Dict[str, Any]]:
     return await _default_service.get_team_season_statistics(team_id, tournament_id, season_id)
+
+
+async def get_team_overview_statistics(
+    team_sofascore_id: int,
+    tournament_id: int,
+    season_id: int,
+) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_team_overview_statistics(team_sofascore_id, tournament_id, season_id)
+
+
+def build_team_form(last_matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return SofaScoreService.build_team_form(last_matches)
+
+
+async def resolve_team_active_tournaments(team_id: str, sofascore_team_id: int) -> List[Dict[str, Any]]:
+    return await _default_service.resolve_team_active_tournaments(team_id, sofascore_team_id)
+
+
+async def sync_team_overview(
+    team_id: str,
+    sofascore_team_id: int,
+    force: bool = False,
+    priority_only: bool = False,
+) -> Dict[str, Any]:
+    return await _default_service.sync_team_overview(
+        team_id,
+        sofascore_team_id,
+        force=force,
+        priority_only=priority_only,
+    )
+
+
+async def refresh_team_overviews(
+    *,
+    force: bool = False,
+    limit: int = 0,
+    priority_only: bool = False,
+) -> Dict[str, Any]:
+    return await _default_service.refresh_team_overviews(
+        force=force,
+        limit=limit,
+        priority_only=priority_only,
+    )
 
 
 async def get_event_odds_history(event_id: int) -> Optional[List[Dict[str, Any]]]:

@@ -103,6 +103,25 @@ team_profile_backfill_state: Dict[str, Any] = {
     "last_result": None,
     "last_error": None,
 }
+team_overview_backfill_task: Optional[asyncio.Task[Any]] = None
+team_overview_backfill_state: Dict[str, Any] = {
+    "status": "idle",
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "chunk_size": 0,
+    "max_chunks": 0,
+    "force": False,
+    "priority_only": False,
+    "chunks_completed": 0,
+    "processed": 0,
+    "updated": 0,
+    "failed": 0,
+    "skipped": 0,
+    "pending_remaining": None,
+    "last_result": None,
+    "last_error": None,
+}
 
 
 @asynccontextmanager
@@ -224,6 +243,94 @@ def _count_pending_team_profiles(client: Client) -> int:
         return 0
 
 
+def _count_pending_team_overviews(client: Client, *, priority_only: bool = False) -> int:
+    try:
+        select_columns = "id,league,team_data_last_fetched_at"
+        rows: List[Dict[str, Any]] = []
+        batch_size = 1000
+        start_index = 0
+        while start_index < 20000:
+            end_index = start_index + batch_size - 1
+            batch = (
+                client.table("teams")
+                .select(select_columns)
+                .not_.is_("sofascore_id", "null")
+                .order("id")
+                .range(start_index, end_index)
+                .execute()
+                .data
+                or []
+            )
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < batch_size:
+                break
+            start_index += batch_size
+    except Exception:
+        return 0
+
+    priority_ids: set[str] = set()
+    tracked_leagues = {
+        _normalize_team_directory_value(name)
+        for name in [
+            "Trendyol Süper Lig",
+            "Premier League",
+            "La Liga",
+            "Serie A",
+            "Bundesliga",
+            "Ligue 1",
+            "UEFA Sampiyonlar Ligi",
+            "UEFA Avrupa Ligi",
+            "UEFA Konferans Ligi",
+        ]
+    }
+    if priority_only:
+        today = datetime.now(scheduler.timezone)
+        start = (today - timedelta(days=14)).date().isoformat()
+        end = (today + timedelta(days=14)).date().isoformat()
+        try:
+            match_rows = (
+                client.table("matches")
+                .select("home_team_id,away_team_id")
+                .gte("match_date", f"{start}T00:00:00")
+                .lte("match_date", f"{end}T23:59:59")
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            match_rows = []
+        for row in match_rows:
+            for key in ("home_team_id", "away_team_id"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    priority_ids.add(value)
+
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    count = 0
+    for row in rows:
+        if priority_only:
+            league_name = _normalize_team_directory_value(row.get("league"))
+            if str(row.get("id") or "") not in priority_ids and league_name not in tracked_leagues:
+                continue
+        last_fetched = str(row.get("team_data_last_fetched_at") or "").strip()
+        if not last_fetched:
+            count += 1
+            continue
+        try:
+            parsed = datetime.fromisoformat(last_fetched.replace("Z", "+00:00"))
+        except ValueError:
+            count += 1
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed < stale_cutoff:
+            count += 1
+    return count
+
+
 async def _run_team_profile_backfill(
     *,
     chunk_size: int,
@@ -286,6 +393,92 @@ async def _run_team_profile_backfill(
     except Exception as exc:
         logger.exception("Team profile backfill failed.")
         team_profile_backfill_state.update(
+            {
+                "status": "failed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+                "last_error": str(exc),
+            }
+        )
+
+
+async def _run_team_overview_backfill(
+    *,
+    chunk_size: int,
+    max_chunks: int,
+    force: bool,
+    priority_only: bool,
+) -> None:
+    team_overview_backfill_state.update(
+        {
+            "status": "running",
+            "running": True,
+            "started_at": datetime.now(scheduler.timezone).isoformat(),
+            "finished_at": None,
+            "chunk_size": chunk_size,
+            "max_chunks": max_chunks,
+            "force": bool(force),
+            "priority_only": bool(priority_only),
+            "chunks_completed": 0,
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "pending_remaining": None,
+            "last_result": None,
+            "last_error": None,
+        }
+    )
+
+    try:
+        client = get_supabase_client()
+        total_chunks = max(0, int(max_chunks))
+        normalized_chunk = max(1, min(int(chunk_size), 1000))
+
+        while True:
+            if total_chunks > 0 and int(team_overview_backfill_state.get("chunks_completed") or 0) >= total_chunks:
+                break
+
+            result = await scheduler.refresh_sofascore_team_overviews(
+                force=force,
+                limit=normalized_chunk,
+                priority_only=priority_only,
+            )
+            processed = int(result.get("processed", 0) or 0)
+            updated = int(result.get("updated", 0) or 0)
+            failed = int(result.get("failed", 0) or 0)
+            skipped = int(result.get("skipped", 0) or 0)
+
+            if processed <= 0:
+                team_overview_backfill_state["last_result"] = result
+                team_overview_backfill_state["pending_remaining"] = _count_pending_team_overviews(
+                    client,
+                    priority_only=priority_only,
+                )
+                break
+
+            team_overview_backfill_state["chunks_completed"] = int(team_overview_backfill_state.get("chunks_completed") or 0) + 1
+            team_overview_backfill_state["processed"] = int(team_overview_backfill_state.get("processed") or 0) + processed
+            team_overview_backfill_state["updated"] = int(team_overview_backfill_state.get("updated") or 0) + updated
+            team_overview_backfill_state["failed"] = int(team_overview_backfill_state.get("failed") or 0) + failed
+            team_overview_backfill_state["skipped"] = int(team_overview_backfill_state.get("skipped") or 0) + skipped
+            team_overview_backfill_state["pending_remaining"] = _count_pending_team_overviews(
+                client,
+                priority_only=priority_only,
+            )
+            team_overview_backfill_state["last_result"] = result
+            await asyncio.sleep(1)
+
+        team_overview_backfill_state.update(
+            {
+                "status": "completed",
+                "running": False,
+                "finished_at": datetime.now(scheduler.timezone).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.exception("Team overview backfill failed.")
+        team_overview_backfill_state.update(
             {
                 "status": "failed",
                 "running": False,
@@ -3789,6 +3982,160 @@ async def admin_team_profile_backfill_status() -> Dict[str, Any]:
     }
 
 
+@app.post("/admin/sync/teams/overview")
+async def admin_sync_team_overviews(
+    force: bool = Query(default=False),
+    limit: int = Query(default=0, ge=0, le=2000),
+    priority_only: bool = Query(default=False),
+) -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    result = await scheduler.refresh_sofascore_team_overviews(
+        force=force,
+        limit=limit,
+        priority_only=priority_only,
+    )
+    return {"status": "ok", **result}
+
+
+@app.post("/admin/sync/teams/overview/backfill")
+async def admin_start_team_overview_backfill(
+    chunk_size: int = Query(default=200, ge=1, le=1000),
+    max_chunks: int = Query(default=0, ge=0, le=1000),
+    force: bool = Query(default=False),
+    priority_only: bool = Query(default=False),
+) -> Dict[str, Any]:
+    global team_overview_backfill_task
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    if team_overview_backfill_task is not None and not team_overview_backfill_task.done():
+        return {
+            "status": "running",
+            "message": "Team overview backfill zaten calisiyor",
+            "state": team_overview_backfill_state,
+        }
+
+    team_overview_backfill_task = asyncio.create_task(
+        _run_team_overview_backfill(
+            chunk_size=int(chunk_size),
+            max_chunks=int(max_chunks),
+            force=bool(force),
+            priority_only=bool(priority_only),
+        )
+    )
+    return {
+        "status": "started",
+        "message": "Team overview backfill arka planda basladi",
+        "chunk_size": int(chunk_size),
+        "max_chunks": int(max_chunks),
+        "force": bool(force),
+        "priority_only": bool(priority_only),
+    }
+
+
+@app.get("/admin/sync/teams/overview/backfill/status")
+async def admin_team_overview_backfill_status() -> Dict[str, Any]:
+    running = team_overview_backfill_task is not None and not team_overview_backfill_task.done()
+    return {
+        "status": "ok",
+        "backfill": {
+            "status": team_overview_backfill_state.get("status"),
+            "running": bool(team_overview_backfill_state.get("running")) or running,
+            "started_at": team_overview_backfill_state.get("started_at"),
+            "finished_at": team_overview_backfill_state.get("finished_at"),
+            "chunk_size": team_overview_backfill_state.get("chunk_size"),
+            "max_chunks": team_overview_backfill_state.get("max_chunks"),
+            "force": team_overview_backfill_state.get("force"),
+            "priority_only": team_overview_backfill_state.get("priority_only"),
+            "chunks_completed": team_overview_backfill_state.get("chunks_completed"),
+            "processed": team_overview_backfill_state.get("processed"),
+            "updated": team_overview_backfill_state.get("updated"),
+            "failed": team_overview_backfill_state.get("failed"),
+            "skipped": team_overview_backfill_state.get("skipped"),
+            "pending_remaining": team_overview_backfill_state.get("pending_remaining"),
+            "last_result": team_overview_backfill_state.get("last_result"),
+            "last_error": team_overview_backfill_state.get("last_error"),
+        },
+    }
+
+
+@app.get("/admin/sync/teams/overview/status")
+async def admin_team_overview_status() -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    total_teams = 0
+    stale_count = 0
+    pending_count = 0
+    try:
+        team_rows = (
+            client.table("teams")
+            .select("id,team_data_sync_status,team_data_last_fetched_at")
+            .not_.is_("sofascore_id", "null")
+            .limit(10000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.exception("Team overview status query failed.")
+        raise HTTPException(status_code=500, detail="Team overview status failed.") from exc
+
+    total_teams = len(team_rows)
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    for row in team_rows:
+        if str(row.get("team_data_sync_status") or "").strip().lower() in {"", "pending", "stale"}:
+            pending_count += 1
+        last_fetched = str(row.get("team_data_last_fetched_at") or "").strip()
+        if not last_fetched:
+            stale_count += 1
+            continue
+        try:
+            parsed = datetime.fromisoformat(last_fetched.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed < stale_cutoff:
+                stale_count += 1
+        except ValueError:
+            stale_count += 1
+
+    overview_cache_count = 0
+    snapshot_count = 0
+    try:
+        overview_cache_count = int(client.table("team_overview_cache").select("id", count="exact").limit(1).execute().count or 0)
+    except Exception:
+        overview_cache_count = 0
+    try:
+        snapshot_count = int(client.table("team_overview_daily_snapshots").select("id", count="exact").limit(1).execute().count or 0)
+    except Exception:
+        snapshot_count = 0
+
+    return {
+        "status": "ok",
+        "total_teams": total_teams,
+        "team_overview_cache_count": overview_cache_count,
+        "team_overview_daily_snapshots_count": snapshot_count,
+        "pending_overview_count": pending_count,
+        "stale_overview_count": stale_count,
+        "overview_backfill": {
+            "status": team_overview_backfill_state.get("status"),
+            "running": bool(team_overview_backfill_state.get("running")) or (team_overview_backfill_task is not None and not team_overview_backfill_task.done()),
+            "chunk_size": team_overview_backfill_state.get("chunk_size"),
+            "chunks_completed": team_overview_backfill_state.get("chunks_completed"),
+            "processed": team_overview_backfill_state.get("processed"),
+            "updated": team_overview_backfill_state.get("updated"),
+            "failed": team_overview_backfill_state.get("failed"),
+            "skipped": team_overview_backfill_state.get("skipped"),
+            "pending_remaining": team_overview_backfill_state.get("pending_remaining"),
+            "last_result": team_overview_backfill_state.get("last_result"),
+            "last_error": team_overview_backfill_state.get("last_error"),
+        },
+        "scheduler": scheduler.scheduler_status(),
+    }
+
+
 @app.get("/admin/sync/teams/status")
 async def admin_team_sync_status() -> Dict[str, Any]:
     try:
@@ -3797,7 +4144,14 @@ async def admin_team_sync_status() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     select_columns = "id,sofascore_id"
-    for optional_column in ["logo_url", "coach_name", "profile_sync_status", "profile_last_fetched_at"]:
+    for optional_column in [
+        "logo_url",
+        "coach_name",
+        "profile_sync_status",
+        "profile_last_fetched_at",
+        "team_data_sync_status",
+        "team_data_last_fetched_at",
+    ]:
         try:
             client.table("teams").select(optional_column).limit(1).execute()
             select_columns += f",{optional_column}"
@@ -3823,6 +4177,9 @@ async def admin_team_sync_status() -> Dict[str, Any]:
     missing_coach = 0
     stale_profiles = 0
     pending_profiles = 0
+    stale_overviews = 0
+    pending_overviews = 0
+    overview_stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     for row in team_rows:
         if not str(row.get("logo_url") or "").strip():
             missing_logo += 1
@@ -3832,6 +4189,20 @@ async def admin_team_sync_status() -> Dict[str, Any]:
             pending_profiles += 1
         if _is_profile_stale(row.get("profile_last_fetched_at")):
             stale_profiles += 1
+        if str(row.get("team_data_sync_status") or "").strip().lower() in {"", "pending", "stale"}:
+            pending_overviews += 1
+        last_overview_raw = str(row.get("team_data_last_fetched_at") or "").strip()
+        if not last_overview_raw:
+            stale_overviews += 1
+        else:
+            try:
+                parsed = datetime.fromisoformat(last_overview_raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                if parsed < overview_stale_cutoff:
+                    stale_overviews += 1
+            except ValueError:
+                stale_overviews += 1
 
     cache_count = 0
     try:
@@ -3840,14 +4211,24 @@ async def admin_team_sync_status() -> Dict[str, Any]:
     except Exception:
         cache_count = 0
 
+    overview_cache_count = 0
+    try:
+        overview_cache_result = client.table("team_overview_cache").select("id", count="exact").limit(1).execute()
+        overview_cache_count = int(overview_cache_result.count or 0)
+    except Exception:
+        overview_cache_count = 0
+
     return {
         "status": "ok",
         "total_teams": total_teams,
         "team_profile_cache_count": cache_count,
+        "team_overview_cache_count": overview_cache_count,
         "missing_logo_count": missing_logo,
         "missing_coach_count": missing_coach,
         "stale_profile_count": stale_profiles,
         "pending_profile_count": pending_profiles,
+        "stale_overview_count": stale_overviews,
+        "pending_overview_count": pending_overviews,
         "profile_backfill": {
             "status": team_profile_backfill_state.get("status"),
             "running": bool(team_profile_backfill_state.get("running")) or (team_profile_backfill_task is not None and not team_profile_backfill_task.done()),
@@ -3857,6 +4238,17 @@ async def admin_team_sync_status() -> Dict[str, Any]:
             "updated": team_profile_backfill_state.get("updated"),
             "failed": team_profile_backfill_state.get("failed"),
             "pending_remaining": team_profile_backfill_state.get("pending_remaining"),
+        },
+        "overview_backfill": {
+            "status": team_overview_backfill_state.get("status"),
+            "running": bool(team_overview_backfill_state.get("running")) or (team_overview_backfill_task is not None and not team_overview_backfill_task.done()),
+            "chunk_size": team_overview_backfill_state.get("chunk_size"),
+            "chunks_completed": team_overview_backfill_state.get("chunks_completed"),
+            "processed": team_overview_backfill_state.get("processed"),
+            "updated": team_overview_backfill_state.get("updated"),
+            "failed": team_overview_backfill_state.get("failed"),
+            "skipped": team_overview_backfill_state.get("skipped"),
+            "pending_remaining": team_overview_backfill_state.get("pending_remaining"),
         },
         "scheduler": scheduler.scheduler_status(),
     }
@@ -3870,7 +4262,14 @@ async def admin_sync_status() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     cache_counts: Dict[str, int] = {}
-    for table_name in ["team_season_stats_cache", "team_top_players_cache", "league_standings_cache", "team_profile_cache"]:
+    for table_name in [
+        "team_season_stats_cache",
+        "team_top_players_cache",
+        "league_standings_cache",
+        "team_profile_cache",
+        "team_overview_cache",
+        "team_overview_daily_snapshots",
+    ]:
         try:
             rows = client.table(table_name).select("id", count="exact").limit(1).execute()
             cache_counts[table_name] = int(rows.count or 0)
@@ -4472,6 +4871,118 @@ async def get_team_detail(team_id: str) -> Dict[str, Any]:
     cache_map = _load_team_profile_cache_map(client, [team_id])
     item = _serialize_team_directory_item(team_row, cache_map.get(team_id, {}))
     return {"team": item}
+
+
+@app.get("/teams/{team_id}/overview")
+async def get_team_overview(team_id: str) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    select_columns = "id,name,league,country,sofascore_id"
+    for optional_column in [
+        "logo_url",
+        "coach_name",
+        "coach_sofascore_id",
+        "sofascore_team_url",
+        "profile_sync_status",
+        "profile_last_fetched_at",
+        "slug",
+        "team_status",
+        "team_data_sync_status",
+        "team_data_last_fetched_at",
+        "team_data_last_error",
+    ]:
+        try:
+            client.table("teams").select(optional_column).limit(1).execute()
+            select_columns += f",{optional_column}"
+        except Exception:
+            continue
+
+    try:
+        rows = (
+            client.table("teams")
+            .select(select_columns)
+            .eq("id", team_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.exception("Team overview team query failed. team_id=%s", team_id)
+        raise HTTPException(status_code=500, detail="Team overview failed.") from exc
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    team_row = rows[0]
+    sofascore_team_id = int(team_row.get("sofascore_id") or 0)
+    if sofascore_team_id <= 0:
+        raise HTTPException(status_code=404, detail="Team overview not available for this team.")
+
+    cache_map = _load_team_profile_cache_map(client, [team_id])
+    team_item = _serialize_team_directory_item(team_row, cache_map.get(team_id, {}))
+
+    overview_rows: List[Dict[str, Any]] = []
+    try:
+        overview_rows = (
+            client.table("team_overview_cache")
+            .select("*")
+            .eq("team_id", team_id)
+            .order("updated_at", desc=True)
+            .limit(20)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        overview_rows = []
+
+    if not overview_rows and ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None:
+        try:
+            await sofascore.sync_team_overview(team_id, sofascore_team_id, force=False)
+            overview_rows = (
+                client.table("team_overview_cache")
+                .select("*")
+                .eq("team_id", team_id)
+                .order("updated_at", desc=True)
+                .limit(20)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            logger.exception("Team overview on-demand sync failed. team_id=%s", team_id)
+
+    tournaments = [
+        {
+            "tournament_id": row.get("tournament_id"),
+            "season_id": row.get("season_id"),
+            "tournament_name": row.get("tournament_name"),
+            "season_name": row.get("season_name"),
+            "last_five_matches": row.get("last_five_matches") or [],
+            "form_last_ten": row.get("form_last_ten") or {},
+            "summary_stats": row.get("summary_stats") or {},
+            "attack_stats": row.get("attack_stats") or {},
+            "passing_stats": row.get("passing_stats") or {},
+            "defending_stats": row.get("defending_stats") or {},
+            "other_stats": row.get("other_stats") or {},
+            "updated_at": row.get("updated_at"),
+        }
+        for row in overview_rows
+    ]
+
+    return {
+        "team": {
+            **team_item,
+            "team_data_sync_status": team_row.get("team_data_sync_status") or "pending",
+            "team_data_last_fetched_at": team_row.get("team_data_last_fetched_at"),
+            "team_data_last_error": team_row.get("team_data_last_error"),
+        },
+        "tournaments": tournaments,
+    }
 
 
 @app.get("/matches/today")

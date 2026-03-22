@@ -40,6 +40,7 @@ class BettingScheduler:
         self.transfermarkt: TransfermarktService = get_transfermarkt_service()
         self.match_analyzer: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
         self.team_profile_refresh_lock = asyncio.Lock()
+        self.team_overview_refresh_lock = asyncio.Lock()
 
     def set_match_analyzer(self, analyzer: Callable[..., Awaitable[Dict[str, Any]]]) -> None:
         self.match_analyzer = analyzer
@@ -394,6 +395,47 @@ class BettingScheduler:
     async def refresh_sofascore_team_profiles_chunked(self, chunk_size: int = 200) -> Dict[str, Any]:
         normalized_chunk_size = max(1, min(int(chunk_size or 200), 1000))
         result = await self.refresh_sofascore_team_profiles(force=False, limit=normalized_chunk_size)
+        result["chunk_size"] = normalized_chunk_size
+        return result
+
+    async def refresh_sofascore_team_overviews(
+        self,
+        *,
+        force: bool = False,
+        limit: int = 0,
+        priority_only: bool = False,
+    ) -> Dict[str, Any]:
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed": 0, "updated": 0, "failed": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
+        async with self.team_overview_refresh_lock:
+            result = await self.sofascore.refresh_team_overviews(
+                force=force,
+                limit=limit,
+                priority_only=priority_only,
+            )
+        logger.info(
+            "Sofascore team overview gorevi tamamlandi. processed=%s updated=%s failed=%s skipped=%s priority_only=%s",
+            result.get("processed", 0),
+            result.get("updated", 0),
+            result.get("failed", 0),
+            result.get("skipped", 0),
+            result.get("priority_only", False),
+        )
+        return result
+
+    async def refresh_sofascore_team_overviews_chunked(
+        self,
+        *,
+        chunk_size: int = 200,
+        force: bool = False,
+        priority_only: bool = False,
+    ) -> Dict[str, Any]:
+        normalized_chunk_size = max(1, min(int(chunk_size or 200), 1000))
+        result = await self.refresh_sofascore_team_overviews(
+            force=force,
+            limit=normalized_chunk_size,
+            priority_only=priority_only,
+        )
         result["chunk_size"] = normalized_chunk_size
         return result
 
@@ -875,6 +917,23 @@ class BettingScheduler:
                 minutes=15,
                 kwargs={"chunk_size": 200},
                 id="sofascore-team-profiles-batch-15m",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_sofascore_team_overviews,
+                "cron",
+                hour=4,
+                minute=0,
+                kwargs={"force": True, "limit": 0, "priority_only": True},
+                id="sofascore-team-overview-priority-4am",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_sofascore_team_overviews_chunked,
+                "interval",
+                hours=1,
+                kwargs={"chunk_size": 200, "force": False, "priority_only": False},
+                id="sofascore-team-overview-global-rolling",
                 replace_existing=True,
             )
             self.scheduler.add_job(
