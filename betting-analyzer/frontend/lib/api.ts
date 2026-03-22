@@ -1,4 +1,35 @@
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "/api/backend";
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/$/, "");
+}
+
+function isLocalUrl(value: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(value);
+}
+
+function resolveBackendUrl(): string {
+  const internalUrl = (process.env.BACKEND_INTERNAL_URL ?? "").trim();
+  const serviceBackendUrl = (process.env.SERVICE_URL_BACKEND ?? "").trim();
+  const publicUrl = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "").trim();
+
+  if (typeof window === "undefined") {
+    if (internalUrl) {
+      return trimTrailingSlash(internalUrl);
+    }
+    if (serviceBackendUrl) {
+      return trimTrailingSlash(serviceBackendUrl);
+    }
+    if (publicUrl && !isLocalUrl(publicUrl)) {
+      return trimTrailingSlash(publicUrl);
+    }
+    return "http://localhost:8000";
+  }
+
+  if (publicUrl && !isLocalUrl(publicUrl)) {
+    return trimTrailingSlash(publicUrl);
+  }
+
+  return "/api/backend";
+}
 
 export type DashboardMatch = {
   match_id: string;
@@ -374,7 +405,8 @@ export type BacktestStatusResponse = {
 };
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BACKEND_URL}${path}`, {
+  const backendUrl = resolveBackendUrl();
+  const response = await fetch(`${backendUrl}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",

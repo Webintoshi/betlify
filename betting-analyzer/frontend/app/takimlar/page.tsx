@@ -142,14 +142,30 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
   const q = normalizeValue(params.q);
   const limit = Math.max(1, Math.min(Number(params.limit) || 200, 500));
 
-  const teamsResponse = await getTeams({
-    league: league || undefined,
-    country: country || undefined,
-    q: q || undefined,
-    limit
-  });
+  let teamsResponse: { count: number; items: TeamDirectoryItem[] } = {
+    count: 0,
+    items: []
+  };
+  let allTeamsResponse: { count: number; items: TeamDirectoryItem[] } = {
+    count: 0,
+    items: []
+  };
+  let fetchError: string | null = null;
 
-  const allTeamsResponse = await getTeams({ limit: 500 });
+  try {
+    [teamsResponse, allTeamsResponse] = await Promise.all([
+      getTeams({
+        league: league || undefined,
+        country: country || undefined,
+        q: q || undefined,
+        limit
+      }),
+      getTeams({ limit: 500 })
+    ]);
+  } catch (error) {
+    fetchError = error instanceof Error ? error.message : "Takim verisi alinamadi";
+  }
+
   const leagueOptions = buildLeagueOptions(allTeamsResponse.items ?? []);
   const countryOptions = buildCountryOptions(allTeamsResponse.items ?? []);
   const groupedTeams = groupTeamsByLeague(teamsResponse.items ?? []);
@@ -262,6 +278,25 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
         </form>
       </Card>
+
+      {fetchError ? (
+        <Card className="border-2 border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/15 text-amber-300">
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3.75m0 3.75h.008v.008H12v-.008z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.29 3.86l-7.5 13A1 1 0 003.65 18.5h16.7a1 1 0 00.86-1.64l-7.5-13a1 1 0 00-1.72 0z" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <CardTitle className="text-sm">Takim verisi su anda yuklenemedi</CardTitle>
+              <CardDescription className="mt-1 normal-case tracking-normal">
+                Backend baglantisi veya ortam degiskeni hatasi var. Ayrinti: {fetchError}
+              </CardDescription>
+            </div>
+          </div>
+        </Card>
+      ) : null}
 
       {groupedTeams.length === 0 ? (
         <Card className="py-16 text-center">
