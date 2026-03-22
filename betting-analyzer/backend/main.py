@@ -4250,6 +4250,25 @@ def _canonical_country_label(value: Any) -> str:
     return repaired
 
 
+def _serialize_team_directory_item(row: Dict[str, Any], cache_row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cache_row = cache_row or {}
+    return {
+        "id": str(row.get("id") or ""),
+        "name": _repair_mojibake_text(row.get("name") or cache_row.get("team_name") or ""),
+        "league": _repair_mojibake_text(row.get("league") or ""),
+        "country": _canonical_country_label(row.get("country") or cache_row.get("country") or ""),
+        "logo_url": row.get("logo_url") or cache_row.get("logo_url"),
+        "coach_name": _repair_mojibake_text(row.get("coach_name") or cache_row.get("coach_name")),
+        "sofascore_id": row.get("sofascore_id"),
+        "coach_sofascore_id": row.get("coach_sofascore_id") or cache_row.get("coach_sofascore_id"),
+        "sofascore_team_url": row.get("sofascore_team_url") or cache_row.get("sofascore_url"),
+        "profile_sync_status": row.get("profile_sync_status") or ("ready" if cache_row else "pending"),
+        "profile_last_fetched_at": row.get("profile_last_fetched_at") or cache_row.get("updated_at"),
+        "slug": row.get("slug"),
+        "team_status": row.get("team_status") or "active",
+    }
+
+
 @app.get("/teams")
 async def list_teams(
     league: Optional[str] = Query(default=None),
@@ -4303,21 +4322,7 @@ async def list_teams(
     for row in rows:
         team_id = str(row.get("id") or "")
         cache_row = cache_map.get(team_id, {})
-        items.append(
-            {
-                "id": team_id,
-                "name": _repair_mojibake_text(row.get("name") or cache_row.get("team_name") or ""),
-                "league": _repair_mojibake_text(row.get("league") or ""),
-                "country": _canonical_country_label(row.get("country") or cache_row.get("country") or ""),
-                "logo_url": row.get("logo_url") or cache_row.get("logo_url"),
-                "coach_name": _repair_mojibake_text(row.get("coach_name") or cache_row.get("coach_name")),
-                "sofascore_id": row.get("sofascore_id"),
-                "coach_sofascore_id": row.get("coach_sofascore_id") or cache_row.get("coach_sofascore_id"),
-                "sofascore_team_url": row.get("sofascore_team_url") or cache_row.get("sofascore_url"),
-                "profile_sync_status": row.get("profile_sync_status") or ("ready" if cache_row else "pending"),
-                "profile_last_fetched_at": row.get("profile_last_fetched_at") or cache_row.get("updated_at"),
-            }
-        )
+        items.append(_serialize_team_directory_item(row, cache_row))
 
     normalized_league = _normalize_team_directory_value(league)
     normalized_country = _normalize_team_directory_value(country)
@@ -4385,6 +4390,53 @@ async def get_team_logo(team_id: str) -> Response:
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800"},
     )
+
+
+@app.get("/teams/{team_id}")
+async def get_team_detail(team_id: str) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    select_columns = "id,name,league,country,sofascore_id"
+    for optional_column in [
+        "logo_url",
+        "coach_name",
+        "coach_sofascore_id",
+        "sofascore_team_url",
+        "profile_sync_status",
+        "profile_last_fetched_at",
+        "slug",
+        "team_status",
+    ]:
+        try:
+            client.table("teams").select(optional_column).limit(1).execute()
+            select_columns += f",{optional_column}"
+        except Exception:
+            continue
+
+    try:
+        row = (
+            client.table("teams")
+            .select(select_columns)
+            .eq("id", team_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.exception("Team detail query failed. team_id=%s", team_id)
+        raise HTTPException(status_code=500, detail="Team detail failed.") from exc
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Team not found.")
+
+    team_row = row[0]
+    cache_map = _load_team_profile_cache_map(client, [team_id])
+    item = _serialize_team_directory_item(team_row, cache_map.get(team_id, {}))
+    return {"team": item}
 
 
 @app.get("/matches/today")

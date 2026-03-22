@@ -2,7 +2,6 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { getTeams, type TeamDirectoryItem } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 type TeamsPageProps = {
   searchParams?: Promise<{
@@ -69,11 +68,11 @@ function TeamLogo({ team }: { team: TeamDirectoryItem }) {
 }
 
 function TeamCard({ team }: { team: TeamDirectoryItem }) {
-  const profileUrl = normalizeValue(team.sofascore_team_url || "");
   const coachName = normalizeValue(team.coach_name || "");
   const syncStatus = normalizeValue(team.profile_sync_status || "");
   const badgeVariant =
     syncStatus === "ready" ? "success" : syncStatus === "stale" ? "warning" : "neutral";
+  const statusLabel = syncStatus === "ready" ? "Hazır" : syncStatus === "stale" ? "Güncellenecek" : "Bekliyor";
 
   return (
     <Card hover className="flex h-full flex-col gap-4 p-4">
@@ -84,10 +83,10 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
           <div className="flex flex-wrap items-center gap-2">
             <CardTitle className="text-base">{team.name}</CardTitle>
             <Badge variant={badgeVariant} size="sm">
-              {syncStatus === "ready" ? "Hazir" : syncStatus === "stale" ? "Bayat" : "Bekliyor"}
+              {statusLabel}
             </Badge>
           </div>
-          <CardDescription className="mt-1 uppercase tracking-wide">
+          <CardDescription className="mt-1 tracking-wide">
             {team.country || "Bilinmiyor"}
           </CardDescription>
         </div>
@@ -95,11 +94,11 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
 
       <dl className="grid gap-3 text-xs">
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Takim</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">Takım</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{team.name}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
-          <dt className="font-black uppercase tracking-wide text-foreground-muted">Ulkesi</dt>
+          <dt className="font-black uppercase tracking-wide text-foreground-muted">Ülkesi</dt>
           <dd className="mt-1 font-bold text-foreground-primary">{team.country || "Bilinmiyor"}</dd>
         </div>
         <div className="rounded-lg border border-card-border bg-background-secondary px-3 py-2">
@@ -112,24 +111,12 @@ function TeamCard({ team }: { team: TeamDirectoryItem }) {
         <Badge variant="accent" size="sm">
           ID #{team.sofascore_id ?? "-"}
         </Badge>
-        {profileUrl ? (
-          <Link
-            href={profileUrl}
-            target="_blank"
-            rel="noreferrer"
-            className={cn(
-              "inline-flex items-center gap-2 rounded-lg border border-accent px-3 py-2",
-              "text-xs font-black uppercase tracking-wide text-accent transition-colors duration-150",
-              "hover:bg-accent hover:text-white"
-            )}
-          >
-            SofaScore Profili
-          </Link>
-        ) : (
-          <span className="text-[11px] font-bold uppercase tracking-wide text-foreground-muted">
-            Profil baglantisi yok
-          </span>
-        )}
+        <Link
+          href={`/takimler/${team.id}`}
+          className="inline-flex items-center gap-2 rounded-lg border border-accent px-3 py-2 text-xs font-black uppercase tracking-wide text-accent transition-colors duration-150 hover:bg-accent hover:text-white"
+        >
+          Takım Detayı
+        </Link>
       </div>
     </Card>
   );
@@ -163,7 +150,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
       getTeams({ limit: 500 })
     ]);
   } catch (error) {
-    fetchError = error instanceof Error ? error.message : "Takim verisi alinamadi";
+    fetchError = error instanceof Error ? error.message : "Takım verisi alınamadı";
   }
 
   const leagueOptions = buildLeagueOptions(allTeamsResponse.items ?? []);
@@ -180,15 +167,15 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
             </Badge>
             <p className="text-xs font-black uppercase tracking-[0.3em] text-accent">Betlify</p>
           </div>
-          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">Takimlar</h1>
+          <h1 className="text-display-sm text-foreground-primary uppercase tracking-tight">Takımlar</h1>
           <p className="mt-1 text-sm font-bold uppercase tracking-wide text-foreground-muted">
-            Lig bazli takim dizini, logo, ulke ve teknik direktor profili
+            Lig bazlı takım dizini, logo, ülke ve teknik direktör profili
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="neutral" size="md">
-            Toplam {teamsResponse.count} takim
+            Toplam {teamsResponse.count} takım
           </Badge>
           {league ? (
             <Badge variant="success" size="md">
@@ -197,7 +184,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           ) : null}
           {country ? (
             <Badge variant="warning" size="md">
-              Ulke: {country}
+              Ülke: {country}
             </Badge>
           ) : null}
         </div>
@@ -210,7 +197,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
             </svg>
           </div>
-          <CardTitle>Takim Filtresi</CardTitle>
+          <CardTitle>Takım Filtresi</CardTitle>
         </div>
 
         <form action="/takimler" className="grid gap-4 lg:grid-cols-4">
@@ -221,7 +208,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               defaultValue={league}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">Tum Ligler</option>
+              <option value="">Tüm Ligler</option>
               {leagueOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -231,13 +218,13 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Ulke</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Ülke</label>
             <select
               name="country"
               defaultValue={country}
               className="w-full rounded-lg border-2 border-card-border bg-background-secondary px-4 py-3 text-sm font-bold uppercase tracking-wide text-foreground-primary focus:border-accent focus:outline-none"
             >
-              <option value="">Tum Ulkeler</option>
+              <option value="">Tüm Ülkeler</option>
               {countryOptions.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -247,7 +234,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Takim Ara</label>
+            <label className="text-xs font-black uppercase tracking-wide text-foreground-tertiary">Takım Ara</label>
             <input
               type="text"
               name="q"
@@ -289,9 +276,9 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               </svg>
             </div>
             <div className="min-w-0">
-              <CardTitle className="text-sm">Takim verisi su anda yuklenemedi</CardTitle>
+              <CardTitle className="text-sm">Takım verisi şu anda yüklenemedi</CardTitle>
               <CardDescription className="mt-1 normal-case tracking-normal">
-                Backend baglantisi veya ortam degiskeni hatasi var. Ayrinti: {fetchError}
+                Backend bağlantısı veya ortam değişkeni hatası var. Ayrıntı: {fetchError}
               </CardDescription>
             </div>
           </div>
@@ -308,10 +295,10 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
             </div>
             <div>
               <p className="text-sm font-black uppercase tracking-wide text-foreground-secondary">
-                Filtreye uygun takim bulunamadi
+                Filtreye uygun takım bulunamadı
               </p>
               <p className="mt-1 text-xs font-bold uppercase tracking-wide text-foreground-muted">
-                Lig veya ulke filtresini gevsetip tekrar deneyin
+                Lig veya ülke filtresini gevşetip tekrar deneyin
               </p>
             </div>
           </div>
@@ -323,7 +310,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <div className="flex flex-wrap items-center gap-3 border-b border-card-border pb-3">
                 <CardTitle className="text-base">{leagueName}</CardTitle>
                 <Badge variant="neutral" size="sm">
-                  {teams.length} takim
+                  {teams.length} takım
                 </Badge>
               </div>
 

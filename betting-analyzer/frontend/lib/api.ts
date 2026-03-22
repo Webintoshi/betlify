@@ -299,11 +299,18 @@ export type TeamDirectoryItem = {
   sofascore_id?: number | null;
   sofascore_team_url?: string | null;
   profile_sync_status?: string | null;
+  profile_last_fetched_at?: string | null;
+  slug?: string | null;
+  team_status?: string | null;
 };
 
 export type TeamsResponse = {
   count: number;
   items: TeamDirectoryItem[];
+};
+
+export type TeamDetailResponse = {
+  team: TeamDirectoryItem;
 };
 
 export type CouponSelectionPayload = {
@@ -481,6 +488,10 @@ export async function getTeams(params?: {
   }
   const query = search.toString();
   return fetchJson<TeamsResponse>(`/teams${query ? `?${query}` : ""}`);
+}
+
+export async function getTeam(teamId: string): Promise<TeamDetailResponse> {
+  return fetchJson<TeamDetailResponse>(`/teams/${teamId}`);
 }
 
 export async function createCoupon(selections: CouponSelectionPayload[]): Promise<{
