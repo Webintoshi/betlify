@@ -306,6 +306,23 @@ export default function BacktestPage() {
         </div>
       )}
 
+      {!!status && status.status === "completed" && (status.summary?.total_predictions ?? 0) === 0 && (
+        <Card>
+          <p className="text-sm font-black text-warning-bright uppercase tracking-wide">
+            Backtest tamamlandi ama tahmin uretilemedi
+          </p>
+          <p className="mt-2 text-xs font-bold text-foreground-muted uppercase tracking-wide">
+            Olasi neden: secilen pencerede backteste uygun odds/market yok.
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs font-bold text-foreground-muted uppercase tracking-wide">
+            <span>Taranan: {status.total_matches_scanned}</span>
+            <span>Odds olmayan: {status.skipped_no_odds}</span>
+            <span>Market cikmayan: {status.skipped_no_market}</span>
+            <span>Hata: {status.failed}</span>
+          </div>
+        </Card>
+      )}
+
       {dataset && (
         <Card>
           <div className="flex items-center justify-between">

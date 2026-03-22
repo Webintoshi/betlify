@@ -1459,6 +1459,17 @@ def _fetch_odds_before(client: Client, match_id: str, before_iso: str) -> Dict[s
                 mapped[key] = odd_value
     except Exception:
         logger.exception("odds table pre-match read failed.")
+    if mapped:
+        return mapped
+
+    # Son fallback: zaman filtresi olmadan en güncel odds snapshot'unu kullan.
+    # Bazı maçlarda kickoff öncesi snapshot yoksa backtest tamamen boş kalmasın.
+    try:
+        latest = _fetch_odds(client, match_id)
+        if latest:
+            return latest
+    except Exception:
+        logger.exception("odds latest fallback read failed.")
     return mapped
 
 
@@ -1499,6 +1510,13 @@ def _fetch_bookmaker_odds_entries_before(client: Client, match_id: str, before_i
 
     if grouped:
         return list(grouped.values())
+
+    try:
+        latest_grouped = _fetch_bookmaker_odds_entries(client, match_id)
+        if latest_grouped:
+            return latest_grouped
+    except Exception:
+        logger.exception("bookmaker odds latest fallback read failed.")
 
     fallback = _fetch_odds_before(client, match_id, before_iso)
     if not fallback:
