@@ -160,6 +160,38 @@ class BacktestRunRequest(BaseModel):
     store_rows: int = Field(default=500, ge=50, le=5000)
 
 
+def _is_profile_stale(raw_value: Any, *, days: int = 7) -> bool:
+    text = str(raw_value or "").strip()
+    if not text:
+        return True
+    try:
+        last_updated = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - last_updated) > timedelta(days=max(1, int(days)))
+
+
+def _load_team_profile_cache_map(client: Client, team_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not team_ids:
+        return {}
+    try:
+        rows = (
+            client.table("team_profile_cache")
+            .select("team_id,team_sofascore_id,team_name,country,logo_url,coach_name,coach_sofascore_id,sofascore_url,updated_at")
+            .in_("team_id", team_ids)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return {}
+    return {
+        str(row.get("team_id")): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("team_id") or "")
+    }
+
+
 async def _run_full_backfill() -> None:
     backfill_state.update(
         {
@@ -3544,6 +3576,88 @@ async def admin_sync_team_logos(
     return {"status": "ok", **result}
 
 
+@app.post("/admin/sync/teams/discover")
+async def admin_discover_teams() -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    result = await scheduler.discover_sofascore_teams()
+    return {"status": "ok", **result}
+
+
+@app.post("/admin/sync/teams/profiles")
+async def admin_sync_team_profiles(
+    force: bool = Query(default=False),
+    limit: int = Query(default=0, ge=0, le=2000),
+) -> Dict[str, Any]:
+    if not ENABLE_SOFASCORE_ENRICHMENT or sofascore is None:
+        raise HTTPException(status_code=410, detail="Sofascore enrichment devre disi.")
+    result = await scheduler.refresh_sofascore_team_profiles(force=force, limit=limit)
+    return {"status": "ok", **result}
+
+
+@app.get("/admin/sync/teams/status")
+async def admin_team_sync_status() -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    select_columns = "id,sofascore_id"
+    for optional_column in ["logo_url", "coach_name", "profile_sync_status", "profile_last_fetched_at"]:
+        try:
+            client.table("teams").select(optional_column).limit(1).execute()
+            select_columns += f",{optional_column}"
+        except Exception:
+            continue
+
+    try:
+        team_rows = (
+            client.table("teams")
+            .select(select_columns)
+            .not_.is_("sofascore_id", "null")
+            .limit(5000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.exception("Team sync status query failed.")
+        raise HTTPException(status_code=500, detail="Team sync status failed.") from exc
+
+    total_teams = len(team_rows)
+    missing_logo = 0
+    missing_coach = 0
+    stale_profiles = 0
+    pending_profiles = 0
+    for row in team_rows:
+        if not str(row.get("logo_url") or "").strip():
+            missing_logo += 1
+        if row.get("coach_name") in (None, ""):
+            missing_coach += 1
+        if str(row.get("profile_sync_status") or "").strip().lower() in {"", "pending", "stale"}:
+            pending_profiles += 1
+        if _is_profile_stale(row.get("profile_last_fetched_at")):
+            stale_profiles += 1
+
+    cache_count = 0
+    try:
+        cache_result = client.table("team_profile_cache").select("id", count="exact").limit(1).execute()
+        cache_count = int(cache_result.count or 0)
+    except Exception:
+        cache_count = 0
+
+    return {
+        "status": "ok",
+        "total_teams": total_teams,
+        "team_profile_cache_count": cache_count,
+        "missing_logo_count": missing_logo,
+        "missing_coach_count": missing_coach,
+        "stale_profile_count": stale_profiles,
+        "pending_profile_count": pending_profiles,
+        "scheduler": scheduler.scheduler_status(),
+    }
+
+
 @app.get("/admin/sync/status")
 async def admin_sync_status() -> Dict[str, Any]:
     try:
@@ -3552,7 +3666,7 @@ async def admin_sync_status() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     cache_counts: Dict[str, int] = {}
-    for table_name in ["team_season_stats_cache", "team_top_players_cache", "league_standings_cache"]:
+    for table_name in ["team_season_stats_cache", "team_top_players_cache", "league_standings_cache", "team_profile_cache"]:
         try:
             rows = client.table(table_name).select("id", count="exact").limit(1).execute()
             cache_counts[table_name] = int(rows.count or 0)
@@ -3893,6 +4007,87 @@ async def trigger_update_stats() -> Dict[str, Any]:
 async def update_settings(_: SettingsUpdateRequest) -> Dict[str, Any]:
     # This endpoint stores no persistent settings yet; frontend keeps local profile.
     return {"status": "ok"}
+
+
+@app.get("/teams")
+async def list_teams(
+    league: Optional[str] = Query(default=None),
+    country: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=5000),
+) -> Dict[str, Any]:
+    try:
+        client = get_supabase_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    select_columns = "id,name,league,country,sofascore_id"
+    for optional_column in [
+        "logo_url",
+        "coach_name",
+        "coach_sofascore_id",
+        "sofascore_team_url",
+        "profile_sync_status",
+        "profile_last_fetched_at",
+        "slug",
+    ]:
+        try:
+            client.table("teams").select(optional_column).limit(1).execute()
+            select_columns += f",{optional_column}"
+        except Exception:
+            continue
+
+    try:
+        query = client.table("teams").select(select_columns, count="exact")
+        try:
+            query = query.not_.is_("sofascore_id", "null")
+        except Exception:
+            pass
+        if league:
+            query = query.eq("league", league)
+        if country:
+            query = query.eq("country", country)
+        if q:
+            query = query.ilike("name", f"%{q}%")
+        result = (
+            query.order("league")
+            .order("name")
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Teams list query failed.")
+        raise HTTPException(status_code=500, detail="Teams list failed.") from exc
+
+    rows = result.data or []
+    team_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+    cache_map = _load_team_profile_cache_map(client, team_ids)
+
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        team_id = str(row.get("id") or "")
+        cache_row = cache_map.get(team_id, {})
+        items.append(
+            {
+                "id": team_id,
+                "name": str(row.get("name") or cache_row.get("team_name") or ""),
+                "league": str(row.get("league") or ""),
+                "country": str(row.get("country") or cache_row.get("country") or ""),
+                "logo_url": row.get("logo_url") or cache_row.get("logo_url"),
+                "coach_name": row.get("coach_name") or cache_row.get("coach_name"),
+                "sofascore_id": row.get("sofascore_id"),
+                "coach_sofascore_id": row.get("coach_sofascore_id") or cache_row.get("coach_sofascore_id"),
+                "sofascore_team_url": row.get("sofascore_team_url") or cache_row.get("sofascore_url"),
+                "profile_sync_status": row.get("profile_sync_status") or ("ready" if cache_row else "pending"),
+                "profile_last_fetched_at": row.get("profile_last_fetched_at") or cache_row.get("updated_at"),
+            }
+        )
+
+    return {
+        "count": int(result.count or len(items)),
+        "items": items,
+    }
 
 
 @app.get("/matches/today")

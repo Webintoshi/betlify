@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from api_football import ApiFootballService, get_service as get_api_service
+from api_football import ApiFootballService, get_service as get_api_service, resolve_season_for_date
 from config import DEFAULT_SEASON, ENABLE_SOFASCORE_ENRICHMENT, TRACKED_LEAGUE_IDS
 from pi_rating import update_team_pi_ratings
 from services.odds_scraper import OddsScraperService, get_service as get_odds_scraper_service
@@ -253,8 +253,12 @@ class BettingScheduler:
     async def update_weekly_team_stats(self) -> Dict[str, Any]:
         updated = 0
         league_rows: Dict[str, int] = {}
+        league_seasons: Dict[str, int] = {}
+        reference_date = datetime.now(self.timezone).date().isoformat()
         for league_id in TRACKED_LEAGUE_IDS:
-            standings = await self.api_service.get_standings(league_id, DEFAULT_SEASON)
+            season = resolve_season_for_date(reference_date, league_id, default=DEFAULT_SEASON)
+            league_seasons[str(league_id)] = season
+            standings = await self.api_service.get_standings(league_id, season)
             standings = standings or []
             league_rows[str(league_id)] = len(standings)
             for row in standings:
@@ -262,12 +266,12 @@ class BettingScheduler:
                 team_id = _safe_int(team.get("id"))
                 if team_id <= 0:
                     continue
-                stats = await self.api_service.get_team_statistics(team_id, league_id, DEFAULT_SEASON)
+                stats = await self.api_service.get_team_statistics(team_id, league_id, season)
                 if stats:
                     updated += 1
 
         logger.info("Haftalik istatistik gorevi tamamlandi. updated_teams=%s", updated)
-        return {"season": DEFAULT_SEASON, "updated_teams": updated, "league_rows": league_rows}
+        return {"season": DEFAULT_SEASON, "season_by_league": league_seasons, "updated_teams": updated, "league_rows": league_rows}
 
     async def fetch_sofascore_daily_events(self) -> Dict[str, Any]:
         if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
@@ -337,6 +341,29 @@ class BettingScheduler:
             "Sofascore team logo gorevi tamamlandi. processed=%s updated=%s",
             result.get("processed", 0),
             result.get("updated", 0),
+        )
+        return result
+
+    async def discover_sofascore_teams(self) -> Dict[str, Any]:
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed": 0, "discovered": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
+        result = await self.sofascore.discover_all_tracked_teams()
+        logger.info(
+            "Sofascore team discovery tamamlandi. processed=%s discovered=%s",
+            result.get("processed", 0),
+            result.get("discovered", 0),
+        )
+        return result
+
+    async def refresh_sofascore_team_profiles(self, force: bool = False, limit: int = 0) -> Dict[str, Any]:
+        if not ENABLE_SOFASCORE_ENRICHMENT or self.sofascore is None:
+            return {"processed": 0, "updated": 0, "skipped": True, "reason": "sofascore_enrichment_disabled"}
+        result = await self.sofascore.refresh_team_profiles(force=force, limit=limit)
+        logger.info(
+            "Sofascore team profile gorevi tamamlandi. processed=%s updated=%s failed=%s",
+            result.get("processed", 0),
+            result.get("updated", 0),
+            result.get("failed", 0),
         )
         return result
 
@@ -802,6 +829,21 @@ class BettingScheduler:
                 "interval",
                 minutes=30,
                 id="sofascore-prematch-2h",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.discover_sofascore_teams,
+                "cron",
+                hour=9,
+                minute=0,
+                id="sofascore-team-discovery-daily",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self.refresh_sofascore_team_profiles,
+                "interval",
+                hours=6,
+                id="sofascore-team-profiles-6h",
                 replace_existing=True,
             )
             self.scheduler.add_job(

@@ -13,13 +13,14 @@ from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from config import SOFASCORE_TOURNAMENT_ID_SET, SOFASCORE_TOURNAMENT_IDS
+from config import SOFASCORE_TOURNAMENT_ID_SET, SOFASCORE_TOURNAMENT_IDS, TRACKED_LEAGUES
 from proxy_pool import ProxyPool, mask_proxy
 
 logger = logging.getLogger("sofascore")
 
 BASE_URL = "https://www.sofascore.com/api/v1"
 SOFASCORE_TEAM_LOGO_URL = "https://api.sofascore.app/api/v1/team/{team_id}/image"
+SOFASCORE_PROFILE_STALE_DAYS = 7
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -97,6 +98,65 @@ def _fractional_to_decimal(value: Any, fallback: float = -1.0) -> float:
 
 def _normalize_name(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+
+
+def _normalize_competition_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _is_stale_timestamp(raw_value: Any, *, days: int = SOFASCORE_PROFILE_STALE_DAYS) -> bool:
+    text = str(raw_value or "").strip()
+    if not text:
+        return True
+    try:
+        last_updated = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - last_updated) > timedelta(days=max(1, int(days)))
+
+
+_TRACKED_COMPETITION_HINTS = {
+    *[_normalize_competition_name(name) for name in TRACKED_LEAGUES.values()],
+    *[_normalize_competition_name(name) for name in SOFASCORE_TOURNAMENT_IDS.values()],
+    "uefa champions league",
+    "uefa europa league",
+    "uefa conference league",
+    "uefa nations league",
+    "uefa euro",
+    "fifa world cup",
+    "turkey super league",
+    "turkey 1 lig",
+    "premier league",
+    "championship",
+    "la liga",
+    "la liga 2",
+    "serie a",
+    "serie b",
+    "bundesliga",
+    "2 bundesliga",
+    "ligue 1",
+    "ligue 2",
+    "eredivisie",
+    "primeira liga",
+    "jupiler pro league",
+    "scottish premiership",
+    "ekstraklasa",
+    "austrian bundesliga",
+}
+
+
+def _is_tracked_tournament(tournament_id: int, tournament_name: str) -> bool:
+    if tournament_id in SOFASCORE_TOURNAMENT_ID_SET:
+        return True
+    normalized = _normalize_competition_name(tournament_name)
+    if not normalized:
+        return False
+    for hint in _TRACKED_COMPETITION_HINTS:
+        if not hint:
+            continue
+        if normalized == hint or normalized in hint or hint in normalized:
+            return True
+    return False
 
 
 class SofaScoreService:
@@ -345,6 +405,15 @@ class SofaScoreService:
             return ""
         return SOFASCORE_TEAM_LOGO_URL.format(team_id=team_sofascore_id)
 
+    @staticmethod
+    def _team_profile_url(team_sofascore_id: int, slug: str = "") -> str:
+        if team_sofascore_id <= 0:
+            return ""
+        normalized_slug = str(slug or "").strip().strip("/")
+        if normalized_slug:
+            return f"https://www.sofascore.com/tr/football/team/{normalized_slug}/{team_sofascore_id}"
+        return f"https://www.sofascore.com/tr/team/{team_sofascore_id}"
+
     def _resolve_team_uuid_by_sofascore_id(self, sofascore_team_id: int) -> Optional[str]:
         if self.supabase is None or sofascore_team_id <= 0:
             return None
@@ -364,6 +433,149 @@ class SofaScoreService:
             return str(rows[0].get("id") or "") or None
         except Exception:
             return None
+
+    def _get_cached_team_profile_row(
+        self,
+        *,
+        team_id: str = "",
+        sofascore_team_id: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        if self.supabase is None or not self._has_column("team_profile_cache", "team_id"):
+            return None
+        try:
+            query = self.supabase.table("team_profile_cache").select(
+                "team_id,team_sofascore_id,team_name,country,logo_url,coach_name,coach_sofascore_id,sofascore_url,payload,updated_at"
+            ).limit(1)
+            if team_id:
+                result = query.eq("team_id", team_id).execute()
+            elif sofascore_team_id > 0:
+                result = query.eq("team_sofascore_id", sofascore_team_id).execute()
+            else:
+                return None
+            rows = result.data or []
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    def _upsert_team_profile_cache(self, *, team_id: str, payload: Dict[str, Any]) -> bool:
+        if self.supabase is None or not team_id or not self._has_column("team_profile_cache", "team_id"):
+            return False
+        team_sofascore_id = _safe_int(payload.get("team_sofascore_id"))
+        if team_sofascore_id <= 0:
+            return False
+        row = {
+            "team_id": team_id,
+            "team_sofascore_id": team_sofascore_id,
+            "team_name": str(payload.get("team_name") or ""),
+            "country": payload.get("country") or None,
+            "logo_url": payload.get("logo_url") or None,
+            "coach_name": payload.get("coach_name") or None,
+            "coach_sofascore_id": _safe_int(payload.get("coach_sofascore_id")) or None,
+            "sofascore_url": payload.get("sofascore_url") or None,
+            "payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.supabase.table("team_profile_cache").upsert(
+                row,
+                on_conflict="team_sofascore_id",
+            ).execute()
+            return True
+        except Exception:
+            logger.exception("team_profile_cache upsert failed. team_id=%s", team_id)
+            return False
+
+    def _sync_team_profile_to_teams_table(self, *, team_id: str, payload: Dict[str, Any]) -> bool:
+        if self.supabase is None or not team_id:
+            return False
+        update_payload: Dict[str, Any] = {}
+        team_name = str(payload.get("team_name") or "").strip()
+        if team_name:
+            update_payload["name"] = team_name
+        country = str(payload.get("country") or "").strip()
+        if country:
+            update_payload["country"] = country
+        league_name = str(payload.get("league") or "").strip()
+        if league_name:
+            update_payload["league"] = league_name
+        if self._has_column("teams", "slug"):
+            update_payload["slug"] = str(payload.get("slug") or "").strip() or None
+        if self._has_column("teams", "sofascore_team_url"):
+            update_payload["sofascore_team_url"] = str(payload.get("sofascore_url") or "").strip() or None
+        if self._has_column("teams", "coach_name"):
+            update_payload["coach_name"] = str(payload.get("coach_name") or "").strip() or None
+        if self._has_column("teams", "coach_sofascore_id"):
+            update_payload["coach_sofascore_id"] = _safe_int(payload.get("coach_sofascore_id")) or None
+        if self._has_column("teams", "team_status"):
+            update_payload["team_status"] = str(payload.get("team_status") or "active").strip() or "active"
+        if self._has_column("teams", "profile_last_fetched_at"):
+            update_payload["profile_last_fetched_at"] = datetime.now(timezone.utc).isoformat()
+        if self._has_column("teams", "profile_source"):
+            update_payload["profile_source"] = "sofascore"
+        if self._has_column("teams", "profile_sync_status"):
+            update_payload["profile_sync_status"] = "ready"
+        if self._has_column("teams", "logo_url"):
+            update_payload["logo_url"] = str(payload.get("logo_url") or "").strip() or None
+        if self._has_column("teams", "logo_source"):
+            update_payload["logo_source"] = "sofascore"
+        if self._has_column("teams", "logo_status"):
+            update_payload["logo_status"] = "ready" if payload.get("logo_url") else "pending"
+        if self._has_column("teams", "logo_last_fetched_at") and payload.get("logo_url"):
+            update_payload["logo_last_fetched_at"] = datetime.now(timezone.utc).isoformat()
+        if self._has_column("teams", "logo_etag") and payload.get("logo_url"):
+            update_payload["logo_etag"] = f"sofascore-team-{_safe_int(payload.get('team_sofascore_id'))}"
+        if self._has_column("teams", "sofascore_last_synced_at"):
+            update_payload["sofascore_last_synced_at"] = datetime.now(timezone.utc).isoformat()
+        if self._has_column("teams", "sofascore_id"):
+            update_payload["sofascore_id"] = _safe_int(payload.get("team_sofascore_id")) or None
+
+        if not update_payload:
+            return False
+        try:
+            self.supabase.table("teams").update(update_payload).eq("id", team_id).execute()
+            return True
+        except Exception:
+            logger.exception("teams profile sync failed. team_id=%s", team_id)
+            return False
+
+    def _parse_team_profile_payload(self, payload: Dict[str, Any], team_id: int) -> Optional[Dict[str, Any]]:
+        team = payload.get("team", {}) if isinstance(payload.get("team"), dict) else {}
+        if not team:
+            return None
+        manager = team.get("manager", {}) if isinstance(team.get("manager"), dict) else {}
+        primary_tournament = team.get("primaryUniqueTournament", {}) if isinstance(team.get("primaryUniqueTournament"), dict) else {}
+        tournament = team.get("tournament", {}) if isinstance(team.get("tournament"), dict) else {}
+        unique_tournament = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+        country_node = team.get("country", {}) if isinstance(team.get("country"), dict) else {}
+        venue = team.get("venue", {}) if isinstance(team.get("venue"), dict) else {}
+        venue_country = venue.get("country", {}) if isinstance(venue.get("country"), dict) else {}
+        category = team.get("category", {}) if isinstance(team.get("category"), dict) else {}
+
+        slug = str(team.get("slug") or "").strip()
+        country = (
+            str(country_node.get("name") or "").strip()
+            or str(venue_country.get("name") or "").strip()
+            or str(category.get("name") or "").strip()
+        )
+        league_name = (
+            str(primary_tournament.get("name") or "").strip()
+            or str(unique_tournament.get("name") or "").strip()
+            or str(tournament.get("name") or "").strip()
+        )
+        coach_name = str(manager.get("name") or "").strip() or None
+        return {
+            "team_sofascore_id": int(team_id),
+            "team_name": str(team.get("name") or f"Team {team_id}").strip(),
+            "country": country or None,
+            "logo_url": self._team_logo_url(team_id),
+            "coach_name": coach_name,
+            "coach_sofascore_id": _safe_int(manager.get("id")) or None,
+            "slug": slug or None,
+            "sofascore_url": self._team_profile_url(team_id, slug=slug),
+            "league": league_name or None,
+            "team_status": "inactive" if bool(team.get("disabled")) else "active",
+            "payload": payload,
+        }
 
     def sync_team_logo(
         self,
@@ -624,13 +836,13 @@ class SofaScoreService:
 
         home_team_id = str(match_row.get("home_team_id") or "")
         away_team_id = str(match_row.get("away_team_id") or "")
-        logo_updates = 0
+        profile_updates = 0
         for team_id, sofa_id in [(home_team_id, home_sofa_id), (away_team_id, away_sofa_id)]:
             if sofa_id <= 0:
                 continue
-            logo_res = self.sync_team_logo(team_id=team_id, sofascore_team_id=sofa_id, force=force)
-            if logo_res.get("updated"):
-                logo_updates += 1
+            profile_res = await self.sync_team_profile(team_id, sofa_id, force=force)
+            if profile_res.get("updated"):
+                profile_updates += 1
 
         tournament_id = 0
         season_id = 0
@@ -693,7 +905,8 @@ class SofaScoreService:
             "event_id": event_id,
             "tournament_id": tournament_id,
             "season_id": season_id,
-            "logo_updates": logo_updates,
+            "logo_updates": profile_updates,
+            "profile_updates": profile_updates,
             "season_cache_updates": season_cache_updates,
             "top_players_updates": top_players_updates,
             "standings_updates": standings_updates,
@@ -747,6 +960,249 @@ class SofaScoreService:
 
         logger.info("Team logo refresh tamamlandi. processed=%s updated=%s force=%s", processed, updated, force)
         return {"processed": processed, "updated": updated, "force": bool(force)}
+
+    async def get_latest_tournament_season_id(self, tournament_id: int) -> Optional[int]:
+        if tournament_id <= 0:
+            return None
+        payload = await self._request(f"/unique-tournament/{tournament_id}/seasons", ttl_seconds=21600)
+        if payload is None:
+            return None
+        seasons = payload.get("seasons", []) if isinstance(payload, dict) else []
+        if not isinstance(seasons, list) or not seasons:
+            return None
+        first = seasons[0] if isinstance(seasons[0], dict) else {}
+        season_id = _safe_int(first.get("id"))
+        return season_id if season_id > 0 else None
+
+    async def get_team_profile(self, team_id: int) -> Optional[Dict[str, Any]]:
+        if team_id <= 0:
+            return None
+        payload = await self._request(f"/team/{team_id}", ttl_seconds=21600)
+        if payload is None:
+            return None
+        normalized = self._parse_team_profile_payload(payload if isinstance(payload, dict) else {}, team_id)
+        return normalized or {}
+
+    async def sync_team_profile(
+        self,
+        team_id: str,
+        sofascore_team_id: int,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"updated": False, "reason": "supabase_unavailable"}
+        if sofascore_team_id <= 0:
+            return {"updated": False, "reason": "invalid_sofascore_team_id"}
+
+        resolved_team_id = str(team_id or "").strip() or self._resolve_team_uuid_by_sofascore_id(sofascore_team_id) or ""
+        if not resolved_team_id:
+            return {"updated": False, "reason": "team_not_found"}
+
+        cached = self._get_cached_team_profile_row(team_id=resolved_team_id, sofascore_team_id=sofascore_team_id)
+        if cached and not force and not _is_stale_timestamp(cached.get("updated_at")):
+            normalized_cached = {
+                "team_sofascore_id": _safe_int(cached.get("team_sofascore_id")),
+                "team_name": str(cached.get("team_name") or "").strip(),
+                "country": cached.get("country"),
+                "logo_url": cached.get("logo_url"),
+                "coach_name": cached.get("coach_name"),
+                "coach_sofascore_id": _safe_int(cached.get("coach_sofascore_id")) or None,
+                "slug": None,
+                "sofascore_url": cached.get("sofascore_url"),
+                "league": None,
+                "team_status": "active",
+                "payload": cached.get("payload") if isinstance(cached.get("payload"), dict) else {},
+            }
+            self._sync_team_profile_to_teams_table(team_id=resolved_team_id, payload=normalized_cached)
+            return {
+                "updated": False,
+                "reason": "fresh_cache",
+                "team_id": resolved_team_id,
+                "team_sofascore_id": sofascore_team_id,
+                "team_name": normalized_cached["team_name"],
+                "coach_name": normalized_cached["coach_name"],
+                "logo_url": normalized_cached["logo_url"],
+            }
+
+        profile = await self.get_team_profile(sofascore_team_id)
+        if not isinstance(profile, dict) or not profile:
+            stale_payload: Dict[str, Any] = {}
+            if self._has_column("teams", "profile_sync_status"):
+                stale_payload["profile_sync_status"] = "stale"
+            if stale_payload:
+                try:
+                    self.supabase.table("teams").update(stale_payload).eq("id", resolved_team_id).execute()
+                except Exception:
+                    logger.exception("team profile stale status update failed. team_id=%s", resolved_team_id)
+            return {"updated": False, "reason": "profile_fetch_failed", "team_id": resolved_team_id}
+
+        self._sync_team_profile_to_teams_table(team_id=resolved_team_id, payload=profile)
+        self._upsert_team_profile_cache(team_id=resolved_team_id, payload=profile)
+        return {
+            "updated": True,
+            "team_id": resolved_team_id,
+            "team_sofascore_id": sofascore_team_id,
+            "team_name": profile.get("team_name"),
+            "coach_name": profile.get("coach_name"),
+            "logo_url": profile.get("logo_url"),
+        }
+
+    async def discover_teams_from_scheduled_events(self, date: str) -> List[Dict[str, Any]]:
+        events = await self.get_scheduled_events(date)
+        if not isinstance(events, list):
+            return []
+        discovered: Dict[int, Dict[str, Any]] = {}
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
+            unique = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
+            league_name = str(unique.get("name") or tournament.get("name") or "Unknown")
+            country_name = str(tournament.get("category", {}).get("name") or "Unknown") if isinstance(tournament.get("category"), dict) else "Unknown"
+            for side in ("homeTeam", "awayTeam"):
+                team_node = event.get(side, {}) if isinstance(event.get(side), dict) else {}
+                team_sofascore_id = _safe_int(team_node.get("id"))
+                if team_sofascore_id <= 0:
+                    continue
+                team_uuid = self._ensure_team(team_node, league_name, country_name)
+                if not team_uuid:
+                    continue
+                discovered[team_sofascore_id] = {
+                    "team_id": team_uuid,
+                    "team_sofascore_id": team_sofascore_id,
+                    "team_name": str(team_node.get("name") or "").strip(),
+                    "league": league_name,
+                    "country": country_name,
+                }
+        return list(discovered.values())
+
+    async def discover_teams_from_standings(self, tournament_id: int, season_id: int) -> List[Dict[str, Any]]:
+        if tournament_id <= 0:
+            return []
+        resolved_season_id = season_id if season_id > 0 else (await self.get_latest_tournament_season_id(tournament_id) or 0)
+        if resolved_season_id <= 0:
+            return []
+
+        rows = await self.get_tournament_standings(tournament_id, resolved_season_id)
+        if not isinstance(rows, list):
+            return []
+
+        league_name = SOFASCORE_TOURNAMENT_IDS.get(tournament_id, f"Tournament {tournament_id}")
+        discovered: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+            if team_sofascore_id <= 0:
+                continue
+            team_payload = {
+                "id": team_sofascore_id,
+                "name": row.get("team_name") or f"Team {team_sofascore_id}",
+            }
+            team_uuid = self._ensure_team(team_payload, league_name, "Unknown")
+            if not team_uuid:
+                continue
+            discovered.append(
+                {
+                    "team_id": team_uuid,
+                    "team_sofascore_id": team_sofascore_id,
+                    "team_name": str(row.get("team_name") or "").strip(),
+                    "league": league_name,
+                    "season_id": resolved_season_id,
+                    "tournament_id": tournament_id,
+                }
+            )
+        return discovered
+
+    async def discover_all_tracked_teams(self) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed": 0, "discovered": 0, "source_breakdown": {}, "reason": "supabase_unavailable"}
+
+        unique_rows: Dict[int, Dict[str, Any]] = {}
+        source_breakdown: Dict[str, int] = {}
+
+        today = datetime.now(timezone.utc).date()
+        for date_str in [today.isoformat(), (today + timedelta(days=1)).isoformat()]:
+            rows = await self.discover_teams_from_scheduled_events(date_str)
+            source_breakdown[f"scheduled:{date_str}"] = len(rows)
+            for row in rows:
+                team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+                if team_sofascore_id > 0:
+                    unique_rows[team_sofascore_id] = row
+
+        for tournament_id in sorted(SOFASCORE_TOURNAMENT_IDS.keys()):
+            rows = await self.discover_teams_from_standings(tournament_id, 0)
+            source_breakdown[f"standings:{tournament_id}"] = len(rows)
+            for row in rows:
+                team_sofascore_id = _safe_int(row.get("team_sofascore_id"))
+                if team_sofascore_id > 0:
+                    unique_rows[team_sofascore_id] = row
+
+        return {
+            "processed": len(unique_rows),
+            "discovered": len(unique_rows),
+            "source_breakdown": source_breakdown,
+            "teams": list(unique_rows.values()),
+        }
+
+    async def refresh_team_profiles(self, *, force: bool = False, limit: int = 0) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"processed": 0, "updated": 0, "reason": "supabase_unavailable"}
+        if not self._has_column("teams", "sofascore_id"):
+            return {"processed": 0, "updated": 0, "reason": "sofascore_id_missing"}
+
+        select_columns = "id,sofascore_id,name,logo_url,coach_name"
+        if self._has_column("teams", "profile_last_fetched_at"):
+            select_columns += ",profile_last_fetched_at"
+        if self._has_column("teams", "profile_sync_status"):
+            select_columns += ",profile_sync_status"
+
+        try:
+            rows = (
+                self.supabase.table("teams")
+                .select(select_columns)
+                .not_.is_("sofascore_id", "null")
+                .order("name")
+                .limit(5000 if limit <= 0 else max(limit * 4, limit))
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            logger.exception("team profile refresh list failed.")
+            return {"processed": 0, "updated": 0, "reason": "query_failed"}
+
+        pending_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("profile_sync_status") or "").strip().lower()
+            stale = force or _is_stale_timestamp(row.get("profile_last_fetched_at"))
+            missing_logo = not str(row.get("logo_url") or "").strip()
+            missing_coach = row.get("coach_name") in (None, "")
+            needs_sync = force or status in {"", "pending", "stale"} or stale or missing_logo or missing_coach
+            if needs_sync:
+                pending_rows.append(row)
+
+        processed = 0
+        updated = 0
+        failed = 0
+        for row in pending_rows:
+            team_id = str(row.get("id") or "").strip()
+            sofascore_team_id = _safe_int(row.get("sofascore_id"))
+            if not team_id or sofascore_team_id <= 0:
+                continue
+            processed += 1
+            result = await self.sync_team_profile(team_id, sofascore_team_id, force=force)
+            if result.get("updated"):
+                updated += 1
+            elif result.get("reason") not in {"fresh_cache"}:
+                failed += 1
+            if limit > 0 and processed >= int(limit):
+                break
+
+        logger.info("Team profile refresh tamamlandi. processed=%s updated=%s failed=%s force=%s", processed, updated, failed, force)
+        return {"processed": processed, "updated": updated, "failed": failed, "force": bool(force)}
 
     @staticmethod
     def _event_goals(event: Dict[str, Any]) -> Tuple[int, int]:
@@ -982,6 +1438,7 @@ class SofaScoreService:
 
         team_uuid = stable_uuid("sofascore-team", sofascore_team_id)
         has_sofascore_column = self._has_column("teams", "sofascore_id")
+        slug = str(team_payload.get("slug") or "").strip()
         record = {
             "id": team_uuid,
             "name": team_payload.get("name", f"Team {sofascore_team_id}"),
@@ -997,6 +1454,14 @@ class SofaScoreService:
             record["logo_source"] = "sofascore"
         if self._has_column("teams", "logo_status"):
             record["logo_status"] = "ready"
+        if self._has_column("teams", "slug") and slug:
+            record["slug"] = slug
+        if self._has_column("teams", "sofascore_team_url") and slug:
+            record["sofascore_team_url"] = self._team_profile_url(sofascore_team_id, slug=slug)
+        if self._has_column("teams", "profile_source"):
+            record["profile_source"] = "sofascore"
+        if self._has_column("teams", "team_status"):
+            record["team_status"] = "inactive" if bool(team_payload.get("disabled")) else "active"
         if self._has_column("teams", "logo_last_fetched_at"):
             record["logo_last_fetched_at"] = datetime.now(timezone.utc).isoformat()
         if self._has_column("teams", "logo_etag"):
@@ -1034,7 +1499,8 @@ class SofaScoreService:
             tournament = event.get("tournament", {}) if isinstance(event.get("tournament"), dict) else {}
             unique_tournament = tournament.get("uniqueTournament", {}) if isinstance(tournament.get("uniqueTournament"), dict) else {}
             tournament_id = _safe_int(unique_tournament.get("id"))
-            if tournament_id not in SOFASCORE_TOURNAMENT_ID_SET:
+            tournament_name = str(unique_tournament.get("name") or tournament.get("name") or "")
+            if not _is_tracked_tournament(tournament_id, tournament_name):
                 continue
 
             event_id = _safe_int(event.get("id"))
@@ -1043,7 +1509,7 @@ class SofaScoreService:
 
             home_team = event.get("homeTeam", {}) if isinstance(event.get("homeTeam"), dict) else {}
             away_team = event.get("awayTeam", {}) if isinstance(event.get("awayTeam"), dict) else {}
-            league_name = SOFASCORE_TOURNAMENT_IDS.get(tournament_id, unique_tournament.get("name", "Unknown"))
+            league_name = SOFASCORE_TOURNAMENT_IDS.get(tournament_id, tournament_name or "Unknown")
             country = str(tournament.get("category", {}).get("name", "Unknown")) if isinstance(tournament.get("category"), dict) else "Unknown"
 
             home_uuid = self._ensure_team(home_team, league_name, country)
@@ -2704,6 +3170,22 @@ async def get_event_odds(event_id: int) -> Optional[Dict[str, Any]]:
 
 async def get_team_performance(team_id: int) -> Optional[Dict[str, Any]]:
     return await _default_service.get_team_performance(team_id)
+
+
+async def get_team_profile(team_id: int) -> Optional[Dict[str, Any]]:
+    return await _default_service.get_team_profile(team_id)
+
+
+async def sync_team_profile(team_id: str, sofascore_team_id: int, force: bool = False) -> Dict[str, Any]:
+    return await _default_service.sync_team_profile(team_id, sofascore_team_id, force=force)
+
+
+async def discover_teams_from_scheduled_events(date: str) -> List[Dict[str, Any]]:
+    return await _default_service.discover_teams_from_scheduled_events(date)
+
+
+async def discover_teams_from_standings(tournament_id: int, season_id: int) -> List[Dict[str, Any]]:
+    return await _default_service.discover_teams_from_standings(tournament_id, season_id)
 
 
 async def populate_team_stats_from_history(team_id: str, sofascore_team_id: int) -> Optional[Dict[str, Any]]:
