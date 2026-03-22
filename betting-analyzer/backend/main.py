@@ -4070,14 +4070,9 @@ async def admin_team_overview_status() -> Dict[str, Any]:
     stale_count = 0
     pending_count = 0
     try:
-        team_rows = (
-            client.table("teams")
-            .select("id,team_data_sync_status,team_data_last_fetched_at")
-            .not_.is_("sofascore_id", "null")
-            .limit(10000)
-            .execute()
-            .data
-            or []
+        team_rows = _fetch_all_sofascore_team_rows(
+            client,
+            "id,team_data_sync_status,team_data_last_fetched_at",
         )
     except Exception as exc:
         logger.exception("Team overview status query failed.")
@@ -4159,15 +4154,7 @@ async def admin_team_sync_status() -> Dict[str, Any]:
             continue
 
     try:
-        team_rows = (
-            client.table("teams")
-            .select(select_columns)
-            .not_.is_("sofascore_id", "null")
-            .limit(5000)
-            .execute()
-            .data
-            or []
-        )
+        team_rows = _fetch_all_sofascore_team_rows(client, select_columns)
     except Exception as exc:
         logger.exception("Team sync status query failed.")
         raise HTTPException(status_code=500, detail="Team sync status failed.") from exc
@@ -4616,7 +4603,14 @@ def _repair_mojibake_text(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    if "Ã" not in text and "Ä" not in text:
+    if "\\u" in text:
+        try:
+            decoded = text.encode("ascii").decode("unicode_escape")
+            if decoded and decoded != text:
+                text = decoded
+        except Exception:
+            pass
+    if not any(token in text for token in ("?", "?", "?")):
         return text
     for encoding in ("latin1", "cp1254", "cp1252"):
         try:
@@ -4626,6 +4620,16 @@ def _repair_mojibake_text(value: Any) -> str:
         if repaired and repaired != text:
             return repaired
     return text
+
+
+def _repair_nested_texts(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _repair_nested_texts(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_repair_nested_texts(item) for item in value]
+    if isinstance(value, str):
+        return _repair_mojibake_text(value)
+    return value
 
 
 def _normalize_team_directory_value(value: Any) -> str:
@@ -4652,8 +4656,33 @@ def _normalize_team_directory_value(value: Any) -> str:
 def _canonical_country_label(value: Any) -> str:
     repaired = _repair_mojibake_text(value)
     if _normalize_team_directory_value(repaired) == "turkiye":
-        return "Türkiye"
+        return "T?rkiye"
     return repaired
+
+
+def _fetch_all_sofascore_team_rows(client: Client, select_columns: str, *, max_rows: int = 20000) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    start = 0
+    batch_size = 1000
+    while start < max_rows:
+        end = min(start + batch_size - 1, max_rows - 1)
+        batch = (
+            client.table("teams")
+            .select(select_columns)
+            .not_.is_("sofascore_id", "null")
+            .order("id")
+            .range(start, end)
+            .execute()
+            .data
+            or []
+        )
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < batch_size:
+            break
+        start += batch_size
+    return rows
 
 
 def _serialize_team_directory_item(row: Dict[str, Any], cache_row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -4957,20 +4986,22 @@ async def get_team_overview(team_id: str) -> Dict[str, Any]:
             logger.exception("Team overview on-demand sync failed. team_id=%s", team_id)
 
     tournaments = [
-        {
-            "tournament_id": row.get("tournament_id"),
-            "season_id": row.get("season_id"),
-            "tournament_name": row.get("tournament_name"),
-            "season_name": row.get("season_name"),
-            "last_five_matches": row.get("last_five_matches") or [],
-            "form_last_ten": row.get("form_last_ten") or {},
-            "summary_stats": row.get("summary_stats") or {},
-            "attack_stats": row.get("attack_stats") or {},
-            "passing_stats": row.get("passing_stats") or {},
-            "defending_stats": row.get("defending_stats") or {},
-            "other_stats": row.get("other_stats") or {},
-            "updated_at": row.get("updated_at"),
-        }
+        _repair_nested_texts(
+            {
+                "tournament_id": row.get("tournament_id"),
+                "season_id": row.get("season_id"),
+                "tournament_name": row.get("tournament_name"),
+                "season_name": row.get("season_name"),
+                "last_five_matches": row.get("last_five_matches") or [],
+                "form_last_ten": row.get("form_last_ten") or {},
+                "summary_stats": row.get("summary_stats") or {},
+                "attack_stats": row.get("attack_stats") or {},
+                "passing_stats": row.get("passing_stats") or {},
+                "defending_stats": row.get("defending_stats") or {},
+                "other_stats": row.get("other_stats") or {},
+                "updated_at": row.get("updated_at"),
+            }
+        )
         for row in overview_rows
     ]
 

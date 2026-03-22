@@ -101,12 +101,35 @@ def _normalize_name(value: Any) -> str:
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
 
-def _canonical_country_name(value: Any) -> str:
+def _repair_sofascore_text(value: Any) -> str:
     text = str(value or "").strip()
+    if not text:
+        return ""
+    if "\\u" in text:
+        try:
+            decoded = text.encode("ascii").decode("unicode_escape")
+            if decoded and decoded != text:
+                text = decoded
+        except Exception:
+            pass
+    if not any(token in text for token in ("?", "?", "?")):
+        return text
+    for encoding in ("latin1", "cp1254", "cp1252"):
+        try:
+            repaired = text.encode(encoding, errors="ignore").decode("utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        if repaired and repaired != text:
+            return repaired
+    return text
+
+
+def _canonical_country_name(value: Any) -> str:
+    text = _repair_sofascore_text(value)
     normalized = _normalize_name(text)
     aliases = {
-        "turkey": "Türkiye",
-        "turkiye": "Türkiye",
+        "turkey": "T?rkiye",
+        "turkiye": "T?rkiye",
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -114,14 +137,14 @@ def _canonical_country_name(value: Any) -> str:
 
 
 def _canonical_league_name(value: Any) -> str:
-    text = str(value or "").strip()
+    text = _repair_sofascore_text(value)
     normalized = _normalize_name(text)
     aliases = {
-        "turkiyesuperlig": "Trendyol Süper Lig",
-        "turkiyesuperleague": "Trendyol Süper Lig",
-        "turkeysuperlig": "Trendyol Süper Lig",
-        "superlig": "Trendyol Süper Lig",
-        "trendyolsuperlig": "Trendyol Süper Lig",
+        "turkiyesuperlig": "Trendyol S?per Lig",
+        "turkiyesuperleague": "Trendyol S?per Lig",
+        "turkeysuperlig": "Trendyol S?per Lig",
+        "superlig": "Trendyol S?per Lig",
+        "trendyolsuperlig": "Trendyol S?per Lig",
         "turkiye1lig": "Trendyol 1. Lig",
         "tff1lig": "Trendyol 1. Lig",
         "trendyol1lig": "Trendyol 1. Lig",
@@ -2595,11 +2618,11 @@ class SofaScoreService:
             return ""
         mapped = OVERVIEW_STAT_LABELS.get(text)
         if mapped:
-            return mapped
+            return _repair_sofascore_text(mapped)
         text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
         text = text.replace("_", " ").replace("-", " ")
         text = re.sub(r"\s+", " ", text).strip()
-        return text[:1].upper() + text[1:] if text else ""
+        return _repair_sofascore_text(text[:1].upper() + text[1:] if text else "")
 
     @staticmethod
     def _normalize_overview_stat_value(value: Any) -> Any:
