@@ -4274,8 +4274,8 @@ async def list_teams(
     league: Optional[str] = Query(default=None),
     country: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0, le=5000),
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0, le=20000),
 ) -> Dict[str, Any]:
     try:
         client = get_supabase_client()

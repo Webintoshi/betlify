@@ -16,10 +16,99 @@ function normalizeValue(value?: string): string {
   return String(value ?? "").trim();
 }
 
+function normalizeLeagueKey(value?: string): string {
+  return normalizeValue(value)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "")
+    .toLowerCase();
+}
+
+const LEAGUE_PRIORITY_ORDER = [
+  "trendyolsuperlig",
+  "superlig",
+  "premierleague",
+  "laliga",
+  "seriea",
+  "bundesliga",
+  "ligue1",
+  "uefachampionsleague",
+  "uefaeuropaleague",
+  "uefaeuropaconferenceleague",
+  "championship",
+  "eredivisie",
+  "primeiraliga",
+  "belgianproleague",
+  "scottishpremiership",
+  "superliggreece",
+  "sls",
+  "tff1lig",
+  "1lig",
+  "2bundesliga",
+  "serieb",
+  "ligue2",
+  "brasileiraobetano",
+  "mls",
+  "saudiproleague",
+  "j1league",
+  "superleaguewomen",
+];
+
+const LEAGUE_DISPLAY_LABELS: Record<string, string> = {
+  trendyolsuperlig: "Süper Lig",
+  superlig: "Süper Lig",
+  premierleague: "Premier Lig",
+  laliga: "La Liga",
+  seriea: "Serie A",
+  bundesliga: "Bundesliga",
+  ligue1: "Ligue 1",
+  uefachampionsleague: "Şampiyonlar Ligi",
+  uefaeuropaleague: "Avrupa Ligi",
+  uefaeuropaconferenceleague: "Konferans Ligi",
+  championship: "Championship",
+  eredivisie: "Eredivisie",
+  primeiraliga: "Primeira Liga",
+  belgianproleague: "Belçika Pro League",
+  scottishpremiership: "İskoçya Premiership",
+  superliggreece: "Yunanistan Süper Ligi",
+  sls: "Süper Lig İsviçre",
+  tff1lig: "1. Lig",
+  "1lig": "1. Lig",
+  "2bundesliga": "2. Bundesliga",
+  serieb: "Serie B",
+  ligue2: "Ligue 2",
+  brasileiraobetano: "Brezilya Série A",
+  mls: "MLS",
+  saudiproleague: "Suudi Pro Lig",
+  j1league: "J1 League",
+  superleaguewomen: "Kadınlar Süper Ligi",
+};
+
+function leaguePriorityIndex(value?: string): number {
+  const key = normalizeLeagueKey(value);
+  const index = LEAGUE_PRIORITY_ORDER.indexOf(key);
+  return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+}
+
+function getLeagueDisplayLabel(value?: string): string {
+  const raw = normalizeValue(value);
+  if (!raw) {
+    return "Bilinmeyen Lig";
+  }
+  return LEAGUE_DISPLAY_LABELS[normalizeLeagueKey(raw)] ?? raw;
+}
+
+function compareLeagueNames(left: string, right: string): number {
+  const leftPriority = leaguePriorityIndex(left);
+  const rightPriority = leaguePriorityIndex(right);
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+  return getLeagueDisplayLabel(left).localeCompare(getLeagueDisplayLabel(right), "tr");
+}
+
 function buildLeagueOptions(items: TeamDirectoryItem[]): string[] {
-  return Array.from(new Set(items.map((item) => normalizeValue(item.league)).filter(Boolean))).sort((a, b) =>
-    a.localeCompare(b, "tr")
-  );
+  return Array.from(new Set(items.map((item) => normalizeValue(item.league)).filter(Boolean))).sort(compareLeagueNames);
 }
 
 function buildCountryOptions(items: TeamDirectoryItem[]): string[] {
@@ -38,7 +127,7 @@ function groupTeamsByLeague(items: TeamDirectoryItem[]): Array<[string, TeamDire
   }
 
   return Array.from(grouped.entries())
-    .sort((left, right) => left[0].localeCompare(right[0], "tr"))
+    .sort((left, right) => compareLeagueNames(left[0], right[0]))
     .map(([league, teams]) => [
       league,
       [...teams].sort((left, right) => normalizeValue(left.name).localeCompare(normalizeValue(right.name), "tr"))
@@ -147,7 +236,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
         q: q || undefined,
         limit
       }),
-      getTeams({ limit: 500 })
+      getTeams({ limit: 6000 })
     ]);
   } catch (error) {
     fetchError = error instanceof Error ? error.message : "Takım verisi alınamadı";
@@ -211,7 +300,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
               <option value="">Tüm Ligler</option>
               {leagueOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option}
+                  {getLeagueDisplayLabel(option)}
                 </option>
               ))}
             </select>
@@ -308,7 +397,7 @@ export default async function TeamsPage({ searchParams }: TeamsPageProps) {
           {groupedTeams.map(([leagueName, teams]) => (
             <section key={leagueName} className="space-y-4">
               <div className="flex flex-wrap items-center gap-3 border-b border-card-border pb-3">
-                <CardTitle className="text-base">{leagueName}</CardTitle>
+                <CardTitle className="text-base">{getLeagueDisplayLabel(leagueName)}</CardTitle>
                 <Badge variant="neutral" size="sm">
                   {teams.length} takım
                 </Badge>
