@@ -4276,6 +4276,40 @@ def _serialize_team_directory_item(row: Dict[str, Any], cache_row: Optional[Dict
     }
 
 
+def _fetch_team_rows(
+    client: Client,
+    *,
+    select_columns: str,
+    batch_size: int = 1000,
+    max_rows: int = 20000,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    start = 0
+    safe_batch_size = max(100, min(int(batch_size), 1000))
+    safe_max_rows = max(safe_batch_size, int(max_rows))
+
+    while start < safe_max_rows:
+        end = min(start + safe_batch_size - 1, safe_max_rows - 1)
+        batch = (
+            client.table("teams")
+            .select(select_columns)
+            .order("league")
+            .order("name")
+            .range(start, end)
+            .execute()
+            .data
+            or []
+        )
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < safe_batch_size:
+            break
+        start += safe_batch_size
+
+    return rows
+
+
 @app.get("/teams")
 async def list_teams(
     league: Optional[str] = Query(default=None),
@@ -4306,22 +4340,16 @@ async def list_teams(
             continue
 
     try:
-        query = client.table("teams").select(select_columns, count="exact")
-        try:
-            query = query.not_.is_("sofascore_id", "null")
-        except Exception:
-            pass
-        result = (
-            query.order("league")
-            .order("name")
-            .range(0, 9999)
-            .execute()
+        rows = _fetch_team_rows(
+            client,
+            select_columns=select_columns,
+            batch_size=1000,
+            max_rows=20000,
         )
     except Exception as exc:
         logger.exception("Teams list query failed.")
         raise HTTPException(status_code=500, detail="Teams list failed.") from exc
 
-    rows = result.data or []
     team_ids = [str(row.get("id") or "") for row in rows if row.get("id")]
     cache_map = _load_team_profile_cache_map(client, team_ids)
 
