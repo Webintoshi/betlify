@@ -4238,7 +4238,14 @@ def _normalize_team_directory_value(value: Any) -> str:
         "turkey": "turkiye",
         "turkiye": "turkiye",
         "turkiyecumhuriyeti": "turkiye",
+        "trendyolsuperlig": "superlig",
+        "turkiyesuperlig": "superlig",
+        "turkeysuperleague": "superlig",
+        "superleagueturkey": "superlig",
         "superlig": "superlig",
+        "trendyol1lig": "1lig",
+        "tff1lig": "1lig",
+        "turkiye1lig": "1lig",
     }
     return aliases.get(compact, compact)
 
