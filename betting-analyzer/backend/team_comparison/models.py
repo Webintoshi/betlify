@@ -11,7 +11,7 @@ DEFAULT_SCOPE = "primary_current"
 DEFAULT_SEASON_MODE = "current"
 DEFAULT_DATA_WINDOW = 10
 DEFAULT_ROBOT = "ana"
-COMPARISON_MODEL_VERSION = "team-comparison-v1"
+COMPARISON_MODEL_VERSION = "team-comparison-v2"
 
 
 @dataclass(frozen=True)

@@ -432,6 +432,16 @@ export type TeamComparisonScoreline = {
 export type TeamComparisonRobotOutput = {
   name: string;
   spec_version: string;
+  methodology: string;
+  key_signals: string[];
+  model_breakdown: Array<{
+    label: string;
+    home_value: number;
+    away_value: number;
+    winner: string;
+    winner_label: string;
+    edge: number;
+  }>;
   report_blocks: Array<{
     title: string;
     body: string;

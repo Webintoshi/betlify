@@ -97,7 +97,48 @@ function RobotPanel({ robot }: { robot: TeamComparisonRobotOutput }) {
             <p className="mt-2 text-sm font-black text-foreground-primary">{repairDisplayText(robot.summary_card.most_likely_score)}</p>
           </div>
         </div>
+        <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
+          <p className="text-[11px] font-black uppercase tracking-wide text-foreground-muted">{t(TR.robotMethodology)}</p>
+          <p className="mt-2 text-sm font-medium leading-6 text-foreground-primary">{repairDisplayText(robot.methodology)}</p>
+        </div>
       </Card>
+
+      <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <Card className="space-y-4">
+          <div className="border-b border-card-border pb-3">
+            <CardTitle>{t(TR.robotSignals)}</CardTitle>
+          </div>
+          <div className="space-y-2">
+            {robot.key_signals.map((signal) => (
+              <div key={signal} className="rounded-lg border border-card-border bg-background-secondary px-4 py-3 text-sm font-medium leading-6 text-foreground-primary">
+                - {repairDisplayText(signal)}
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card className="space-y-4">
+          <div className="border-b border-card-border pb-3">
+            <CardTitle>{t(TR.robotBreakdown)}</CardTitle>
+          </div>
+          <div className="grid gap-3">
+            {robot.model_breakdown.map((row) => (
+              <div key={row.label} className="rounded-lg border border-card-border bg-background-secondary px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-black uppercase tracking-wide text-foreground-muted">{repairDisplayText(row.label)}</p>
+                  <Badge variant={row.winner === "home" ? "accent" : row.winner === "away" ? "warning" : "neutral"} size="sm">
+                    {repairDisplayText(row.winner_label)}
+                  </Badge>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <p className="text-sm font-black text-foreground-primary">Ev: {row.home_value.toFixed(1)}</p>
+                  <p className="text-sm font-black text-foreground-primary">Dep: {row.away_value.toFixed(1)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
 
       {robot.report_blocks.map((block) => (
         <Card key={block.title} className="space-y-3">

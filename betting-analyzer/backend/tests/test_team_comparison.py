@@ -145,6 +145,12 @@ def run_tests() -> None:
         text = " ".join(block["body"] for block in robot["report_blocks"]).lower()
         for token in banned:
             assert token not in text
+        assert robot["methodology"]
+        assert len(robot["key_signals"]) >= 2
+        assert len(robot["model_breakdown"]) >= 4
+
+    power_differences = {round(robot["summary_card"]["power_difference_pct"], 2) for robot in robots}
+    assert len(power_differences) >= 2
 
 
 if __name__ == "__main__":
