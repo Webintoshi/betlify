@@ -25,6 +25,13 @@ class TeamComparisonService:
         self.bma_robot = BMARobot()
         self.gma_robot = GMARobot()
 
+    def _robot_registry(self) -> Dict[str, Any]:
+        return {
+            "ana": self.ana_robot,
+            "bma": self.bma_robot,
+            "gma": self.gma_robot,
+        }
+
     def meta(self) -> Dict[str, Any]:
         meta = TeamComparisonMeta().to_payload()
         featured_teams = []
@@ -146,11 +153,24 @@ class TeamComparisonService:
         request_payload = request.to_payload()
         freshness_payload = self.data_service.build_source_freshness(request)
         request_hash = self.cache_service.build_request_hash(request_payload, freshness_payload, model_version=COMPARISON_MODEL_VERSION)
+        robot_registry = self._robot_registry()
+        robot_hashes = {
+            robot_key: self.cache_service.build_robot_request_hash(
+                request_payload,
+                freshness_payload,
+                model_version=COMPARISON_MODEL_VERSION,
+                robot_key=robot_key,
+                robot_version=str(robot.spec.get("version") or COMPARISON_MODEL_VERSION),
+            )
+            for robot_key, robot in robot_registry.items()
+        }
 
         if not request.refresh:
             cached = self.cache_service.get_cached(request_hash)
-            if cached:
+            cached_robots = {robot_key: self.cache_service.get_cached_robot(robot_hash) for robot_key, robot_hash in robot_hashes.items()}
+            if cached and all(cached_robots.values()):
                 payload = dict(cached.get("comparison_payload") or {})
+                payload["robots"] = {robot_key: dict(robot_row.get("robot_payload") or {}) for robot_key, robot_row in cached_robots.items() if robot_row}
                 payload.setdefault("meta", {})
                 payload["meta"]["cache_hit"] = True
                 self.cache_service.log_request(
@@ -164,6 +184,23 @@ class TeamComparisonService:
                     model_version=str(cached.get("model_version") or COMPARISON_MODEL_VERSION),
                     cache_hit=True,
                 )
+                for robot_key, robot_row in cached_robots.items():
+                    if not robot_row:
+                        continue
+                    self.cache_service.log_robot_request(
+                        request_hash=robot_hashes[robot_key],
+                        base_request_hash=request_hash,
+                        robot_key=robot_key,
+                        request_payload=request_payload,
+                        feature_snapshot=robot_row.get("feature_snapshot") or {},
+                        scenario_snapshot=robot_row.get("scenario_snapshot") or {},
+                        robot_payload=robot_row.get("robot_payload") or {},
+                        confidence_score=float(robot_row.get("confidence_score") or 0.0),
+                        data_quality_score=float(robot_row.get("data_quality_score") or 0.0),
+                        model_version=str(robot_row.get("model_version") or COMPARISON_MODEL_VERSION),
+                        robot_model_version=str(robot_row.get("robot_model_version") or COMPARISON_MODEL_VERSION),
+                        cache_hit=True,
+                    )
                 return payload
 
         snapshot = self.data_service.collect(request)
@@ -171,11 +208,7 @@ class TeamComparisonService:
         features = self.opponent_adjustment_service.apply(features, snapshot)
         scenarios = self.scenario_service.run(snapshot, features, request)
         confidence = self.confidence_service.score(snapshot, features, scenarios)
-        robots_payload = {
-            "ana": self.ana_robot.render(snapshot, features, scenarios, confidence),
-            "bma": self.bma_robot.render(snapshot, features, scenarios, confidence),
-            "gma": self.gma_robot.render(snapshot, features, scenarios, confidence),
-        }
+        robots_payload = {robot_key: robot.render(snapshot, features, scenarios, confidence) for robot_key, robot in robot_registry.items()}
         payload = self._assemble_response(request, snapshot, features, scenarios, confidence, robots_payload, cache_hit=False)
         self.cache_service.write_cache(
             request_hash=request_hash,
@@ -189,4 +222,20 @@ class TeamComparisonService:
             model_version=COMPARISON_MODEL_VERSION,
             cache_hit=False,
         )
+        for robot_key, robot_payload in robots_payload.items():
+            robot = robot_registry[robot_key]
+            self.cache_service.write_robot_cache(
+                request_hash=robot_hashes[robot_key],
+                base_request_hash=request_hash,
+                robot_key=robot_key,
+                request_payload=request_payload,
+                feature_snapshot=features,
+                scenario_snapshot=scenarios,
+                robot_payload=robot_payload,
+                confidence_score=float(confidence.get("confidence_score") or 0.0),
+                data_quality_score=float(confidence.get("data_quality_score") or 0.0),
+                model_version=COMPARISON_MODEL_VERSION,
+                robot_model_version=str(robot.spec.get("version") or COMPARISON_MODEL_VERSION),
+                cache_hit=False,
+            )
         return payload

@@ -4294,6 +4294,8 @@ async def admin_sync_status() -> Dict[str, Any]:
         "team_overview_daily_snapshots",
         "team_comparison_cache",
         "team_comparison_logs",
+        "team_comparison_robot_cache",
+        "team_comparison_robot_logs",
     ]:
         try:
             rows = client.table(table_name).select("id", count="exact").limit(1).execute()
