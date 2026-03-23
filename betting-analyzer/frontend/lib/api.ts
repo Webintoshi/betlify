@@ -313,6 +313,63 @@ export type TeamDetailResponse = {
   team: TeamDirectoryItem;
 };
 
+export type TeamOverviewStatItem = {
+  key: string;
+  label: string;
+  value: string | number | boolean | null;
+};
+
+export type TeamOverviewStatGroup = {
+  items: TeamOverviewStatItem[];
+  values: Record<string, string | number | boolean | null>;
+};
+
+export type TeamOverviewMatch = {
+  date: string;
+  is_cup?: boolean;
+  league?: string;
+  result?: string;
+  is_home?: boolean;
+  event_id?: number;
+  away_goals?: number;
+  home_goals?: number;
+  away_team_id?: number;
+  home_team_id?: number;
+  away_team_name?: string;
+  home_team_name?: string;
+};
+
+export type TeamOverviewTournament = {
+  tournament_id: number;
+  season_id: number;
+  tournament_name?: string;
+  season_name?: string;
+  last_five_matches: TeamOverviewMatch[];
+  form_last_ten: {
+    wins: number;
+    draws: number;
+    losses: number;
+    points: number;
+    results: string[];
+    score_pct: number;
+  };
+  summary_stats: TeamOverviewStatGroup;
+  attack_stats: TeamOverviewStatGroup;
+  passing_stats: TeamOverviewStatGroup;
+  defending_stats: TeamOverviewStatGroup;
+  other_stats: TeamOverviewStatGroup;
+  updated_at: string;
+};
+
+export type TeamOverviewResponse = {
+  team: TeamDirectoryItem & {
+    team_data_sync_status?: string | null;
+    team_data_last_fetched_at?: string | null;
+    team_data_last_error?: string | null;
+  };
+  tournaments: TeamOverviewTournament[];
+};
+
 export type CouponSelectionPayload = {
   match_id: string;
   home_team: string;
@@ -492,6 +549,10 @@ export async function getTeams(params?: {
 
 export async function getTeam(teamId: string): Promise<TeamDetailResponse> {
   return fetchJson<TeamDetailResponse>(`/teams/${teamId}`);
+}
+
+export async function getTeamOverview(teamId: string): Promise<TeamOverviewResponse> {
+  return fetchJson<TeamOverviewResponse>(`/teams/${teamId}/overview`);
 }
 
 export async function createCoupon(selections: CouponSelectionPayload[]): Promise<{

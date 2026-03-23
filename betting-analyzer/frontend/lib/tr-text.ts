@@ -36,6 +36,29 @@ export const TR = {
   status: "Durum",
   lastSynced: "Son E\u015fitleme",
   notYet: "Hen\u00fcz yok",
+  teamOverview: "Tak\u0131m Verileri",
+  teamOverviewBody: "Son ma\u00e7lar, form durumu ve kategori bazl\u0131 sezon istatistikleri bu cache katman\u0131ndan okunur.",
+  noOverviewData: "Bu tak\u0131m i\u00e7in hen\u00fcz overview verisi olu\u015fmad\u0131.",
+  overviewUpdatedAt: "Overview G\u00fcncelleme",
+  activeTournaments: "Aktif Turnuva",
+  overviewStatus: "Overview Durumu",
+  lastFiveMatches: "Son 5 Ma\u00e7",
+  formLastTen: "Son 10 Ma\u00e7 Formu",
+  summaryStats: "\u00d6zet",
+  attackStats: "H\u00fccum",
+  passingStats: "Pas",
+  defendingStats: "Savunma",
+  otherStats: "Di\u011fer",
+  wins: "Galibiyet",
+  draws: "Beraberlik",
+  losses: "Ma\u011flubiyet",
+  points: "Puan",
+  formScore: "Form Skoru",
+  latestTournamentData: "G\u00fcncel turnuva verileri",
+  noStatsInCategory: "Bu kategoride kay\u0131tl\u0131 istatistik yok",
+  home: "Ev",
+  away: "Dep",
+  versus: "vs",
 } as const;
 
 export function decodeUnicodeEscapes(value: string): string {
@@ -51,15 +74,20 @@ export function repairDisplayText(value?: string | null): string {
   }
 
   const unescaped = decodeUnicodeEscapes(text);
-  if (!/[\u00C3\u00C4\u00C5]/.test(unescaped)) {
-    return unescaped;
+  const canonicalized = unescaped
+    .replace(/^T\?rkiye$/i, "T\u00fcrkiye")
+    .replace(/^Turkiye$/i, "T\u00fcrkiye")
+    .replace(/^Turkiye Kupasi$/i, "T\u00fcrkiye Kupas\u0131")
+    .replace(/^Turkiye Super Lig$/i, "Trendyol S\u00fcper Lig");
+  if (!/[\u00C3\u00C4\u00C5]/.test(canonicalized)) {
+    return canonicalized;
   }
 
   try {
-    const bytes = Uint8Array.from(Array.from(unescaped), (character) => character.charCodeAt(0) & 0xff);
+    const bytes = Uint8Array.from(Array.from(canonicalized), (character) => character.charCodeAt(0) & 0xff);
     const repaired = new TextDecoder("utf-8").decode(bytes).trim();
-    return repaired || unescaped;
+    return repaired || canonicalized;
   } catch {
-    return unescaped;
+    return canonicalized;
   }
 }
