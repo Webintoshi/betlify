@@ -3764,7 +3764,7 @@ class SofaScoreService:
         if sofascore_team_id <= 0:
             return []
         target = max(1, limit)
-        events: List[Dict[str, Any]] = []
+        events: List[Tuple[int, Dict[str, Any]]] = []
         seen_event_ids: set[int] = set()
         offsets = [0]
         if target > 20:
@@ -3789,12 +3789,14 @@ class SofaScoreService:
                     continue
                 if event_id > 0:
                     seen_event_ids.add(event_id)
-                events.append(item)
-            if len(events) >= target:
+                start_timestamp = _safe_int(item.get("startTimestamp"))
+                events.append((start_timestamp, item))
+            if len(events) >= max(target, 20):
                 break
 
+        events.sort(key=lambda row: row[0], reverse=True)
         rows: List[Dict[str, Any]] = []
-        for event in events:
+        for _, event in events:
             if len(rows) >= target:
                 break
             if not isinstance(event, dict):
