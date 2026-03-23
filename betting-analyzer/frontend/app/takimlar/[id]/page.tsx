@@ -2,13 +2,29 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { getTeam, getTeamOverview, type TeamOverviewMatch, type TeamOverviewStatGroup, type TeamOverviewTournament } from "@/lib/api";
+import {
+  getTeam,
+  getTeamOverview,
+  type TeamOverviewMatch,
+  type TeamOverviewResponse,
+  type TeamOverviewStatGroup,
+  type TeamOverviewTournament
+} from "@/lib/api";
 import { TR, repairDisplayText } from "@/lib/tr-text";
 
 type TeamDetailPageProps = {
   params: Promise<{
     id: string;
   }>;
+  searchParams?:
+    | Promise<{
+        tournament?: string | string[];
+        season?: string | string[];
+      }>
+    | {
+        tournament?: string | string[];
+        season?: string | string[];
+      };
 };
 
 type TeamBase = {
@@ -25,6 +41,13 @@ type TeamBase = {
 };
 
 function normalizeValue(value?: string | null): string {
+  return String(value ?? "").trim();
+}
+
+function normalizeSearchParam(value?: string | string[]): string {
+  if (Array.isArray(value)) {
+    return String(value[0] ?? "").trim();
+  }
   return String(value ?? "").trim();
 }
 
@@ -58,7 +81,7 @@ function formatNumber(value: string | number | boolean | null | undefined): stri
   }
 
   if (typeof value === "boolean") {
-    return value ? "Evet" : "Hayır";
+    return value ? "Evet" : "Hay\u0131r";
   }
 
   if (typeof value === "number") {
@@ -154,17 +177,14 @@ function LastFiveMatches({ matches }: { matches: TeamOverviewMatch[] }) {
   );
 }
 
-function FormOverview({ tournament }: { tournament: TeamOverviewTournament }) {
-  const form = tournament.form_last_ten;
+function FormOverview({ form }: { form: TeamOverviewResponse["form_last_ten"] }) {
   const results = Array.isArray(form.results) ? form.results : [];
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
         {results.length ? (
-          results.map((result, index) => (
-            <MatchResultBadge key={`${result}-${index}`} result={result} />
-          ))
+          results.map((result, index) => <MatchResultBadge key={`${result}-${index}`} result={result} />)
         ) : (
           <Badge variant="neutral" size="sm">
             -
@@ -229,54 +249,92 @@ function StatsGrid({ title, group }: { title: string; group: TeamOverviewStatGro
   );
 }
 
-function TournamentSection({ tournament }: { tournament: TeamOverviewTournament }) {
-  const tournamentName = repairDisplayText(tournament.tournament_name) || t(TR.unknownLeague);
-  const seasonName = repairDisplayText(tournament.season_name) || String(tournament.season_id);
+function buildTournamentHref(teamId: string, tournamentId: number, seasonId: number): string {
+  const search = new URLSearchParams();
+  search.set("tournament", String(tournamentId));
+  search.set("season", String(seasonId));
+  return `/takimler/${teamId}?${search.toString()}`;
+}
+
+function resolveSelectedTournament(
+  teamId: string,
+  tournaments: TeamOverviewTournament[],
+  defaultTournament: TeamOverviewResponse["default_tournament"],
+  tournamentParam: string,
+  seasonParam: string
+): TeamOverviewTournament | null {
+  if (!tournaments.length) {
+    return null;
+  }
+
+  const requestedTournamentId = Number.parseInt(tournamentParam, 10);
+  const requestedSeasonId = Number.parseInt(seasonParam, 10);
+  if (Number.isFinite(requestedTournamentId) && Number.isFinite(requestedSeasonId)) {
+    const requested = tournaments.find(
+      (tournament) =>
+        tournament.tournament_id === requestedTournamentId && tournament.season_id === requestedSeasonId
+    );
+    if (requested) {
+      return requested;
+    }
+  }
+
+  if (defaultTournament) {
+    const fallback = tournaments.find(
+      (tournament) =>
+        tournament.tournament_id === defaultTournament.tournament_id &&
+        tournament.season_id === defaultTournament.season_id
+    );
+    if (fallback) {
+      return fallback;
+    }
+  }
+
+  return tournaments[0] ?? null;
+}
+
+function TournamentTabs({
+  teamId,
+  tournaments,
+  selectedTournament
+}: {
+  teamId: string;
+  tournaments: TeamOverviewTournament[];
+  selectedTournament: TeamOverviewTournament | null;
+}) {
+  if (!tournaments.length || !selectedTournament) {
+    return null;
+  }
 
   return (
-    <Card className="space-y-6">
-      <div className="flex flex-col gap-3 border-b border-card-border pb-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <CardTitle>{tournamentName}</CardTitle>
-          <CardDescription className="mt-2 normal-case tracking-normal">
-            {seasonName}
-          </CardDescription>
-        </div>
-        <Badge variant="accent" size="sm">
-          {formatDate(tournament.updated_at)}
-        </Badge>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-        <div className="space-y-4">
-          <div className="border-b border-card-border pb-3">
-            <h3 className="text-sm font-black uppercase tracking-wide text-foreground-primary">{t(TR.lastFiveMatches)}</h3>
-          </div>
-          <LastFiveMatches matches={tournament.last_five_matches} />
-        </div>
-
-        <div className="space-y-4">
-          <div className="border-b border-card-border pb-3">
-            <h3 className="text-sm font-black uppercase tracking-wide text-foreground-primary">{t(TR.formLastTen)}</h3>
-          </div>
-          <FormOverview tournament={tournament} />
-        </div>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-2">
-        <StatsGrid title={t(TR.summaryStats)} group={tournament.summary_stats} />
-        <StatsGrid title={t(TR.attackStats)} group={tournament.attack_stats} />
-        <StatsGrid title={t(TR.passingStats)} group={tournament.passing_stats} />
-        <StatsGrid title={t(TR.defendingStats)} group={tournament.defending_stats} />
-      </div>
-
-      <StatsGrid title={t(TR.otherStats)} group={tournament.other_stats} />
-    </Card>
+    <div className="flex flex-wrap gap-3">
+      {tournaments.map((tournament) => {
+        const isActive =
+          tournament.tournament_id === selectedTournament.tournament_id &&
+          tournament.season_id === selectedTournament.season_id;
+        const tournamentName = repairDisplayText(tournament.tournament_name) || t(TR.unknownLeague);
+        return (
+          <Link
+            key={`${tournament.tournament_id}-${tournament.season_id}`}
+            href={buildTournamentHref(teamId, tournament.tournament_id, tournament.season_id)}
+            className={[
+              "inline-flex items-center justify-center rounded-lg border px-4 py-3 text-xs font-black uppercase tracking-wide transition-colors duration-150",
+              isActive
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-card-border text-foreground-secondary hover:border-accent hover:text-accent"
+            ].join(" ")}
+          >
+            {tournamentName}
+          </Link>
+        );
+      })}
+    </div>
   );
 }
 
-export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
+export default async function TeamDetailPage({ params, searchParams }: TeamDetailPageProps) {
   const { id } = await params;
+  const resolvedSearchParams = await searchParams;
 
   const [teamResult, overviewResult] = await Promise.allSettled([getTeam(id), getTeamOverview(id)]);
 
@@ -292,10 +350,25 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
   }
 
   const team = teamSource as TeamBase;
-  const tournaments =
-    overviewResult.status === "fulfilled" && Array.isArray(overviewResult.value.tournaments)
-      ? overviewResult.value.tournaments
-      : [];
+  const overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;
+  const tournaments = Array.isArray(overview?.tournaments) ? overview.tournaments : [];
+  const recentMatches = Array.isArray(overview?.recent_matches) ? overview.recent_matches : [];
+  const formLastTen = overview?.form_last_ten ?? {
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    points: 0,
+    results: [],
+    score_pct: 0
+  };
+
+  const selectedTournament = resolveSelectedTournament(
+    team.id,
+    tournaments,
+    overview?.default_tournament ?? null,
+    normalizeSearchParam(resolvedSearchParams?.tournament),
+    normalizeSearchParam(resolvedSearchParams?.season)
+  );
 
   const teamName = repairDisplayText(team.name);
   const coachName = repairDisplayText(team.coach_name) || t(TR.unknown);
@@ -398,26 +471,60 @@ export default async function TeamDetailPage({ params }: TeamDetailPageProps) {
         </Card>
       </div>
 
-      <Card className="space-y-5">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <Card className="space-y-4">
+          <div className="border-b border-card-border pb-3">
+            <CardTitle>{t(TR.lastFiveMatches)}</CardTitle>
+          </div>
+          <LastFiveMatches matches={recentMatches} />
+        </Card>
+
+        <Card className="space-y-4">
+          <div className="border-b border-card-border pb-3">
+            <CardTitle>{t(TR.formLastTen)}</CardTitle>
+          </div>
+          <FormOverview form={formLastTen} />
+        </Card>
+      </div>
+
+      <Card className="space-y-6">
         <div className="border-b border-card-border pb-4">
-          <CardTitle>{t(TR.teamOverview)}</CardTitle>
+          <CardTitle>{t(TR.tournamentStats)}</CardTitle>
           <CardDescription className="mt-2 normal-case tracking-normal">
             {t(TR.teamOverviewBody)}
           </CardDescription>
         </div>
 
-        {tournaments.length ? (
-          <div className="space-y-6">
-            {tournaments.map((tournament) => (
-              <TournamentSection
-                key={`${tournament.tournament_id}-${tournament.season_id}`}
-                tournament={tournament}
-              />
-            ))}
-          </div>
+        {selectedTournament ? (
+          <>
+            <TournamentTabs teamId={team.id} tournaments={tournaments} selectedTournament={selectedTournament} />
+
+            <div className="flex flex-col gap-3 border-b border-card-border pb-4 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <h3 className="text-lg font-black text-foreground-primary">
+                  {repairDisplayText(selectedTournament.tournament_name) || t(TR.unknownLeague)}
+                </h3>
+                <p className="mt-2 text-sm font-bold text-foreground-muted">
+                  {repairDisplayText(selectedTournament.season_name) || String(selectedTournament.season_id)}
+                </p>
+              </div>
+              <Badge variant="accent" size="sm">
+                {formatDate(selectedTournament.updated_at)}
+              </Badge>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <StatsGrid title={t(TR.summaryStats)} group={selectedTournament.summary_stats} />
+              <StatsGrid title={t(TR.attackStats)} group={selectedTournament.attack_stats} />
+              <StatsGrid title={t(TR.passingStats)} group={selectedTournament.passing_stats} />
+              <StatsGrid title={t(TR.defendingStats)} group={selectedTournament.defending_stats} />
+            </div>
+
+            <StatsGrid title={t(TR.otherStats)} group={selectedTournament.other_stats} />
+          </>
         ) : (
           <div className="rounded-lg border border-card-border bg-background-secondary px-4 py-6 text-sm font-bold text-foreground-muted">
-            {t(TR.noOverviewData)}
+            {t(TR.noTournamentStats)}
           </div>
         )}
       </Card>

@@ -2941,6 +2941,10 @@ class SofaScoreService:
                 }
             )
 
+        team_row = self._get_team_row(team_id) or {}
+        team_league_name = _canonical_league_name(team_row.get("league") or "")
+        domestic_league_key = _normalize_name(team_league_name)
+
         profile_row = self._get_cached_team_profile_row(team_id=team_id, sofascore_team_id=sofascore_team_id) or {}
         profile_payload = profile_row.get("payload") if isinstance(profile_row.get("payload"), dict) else {}
         team_payload = profile_payload.get("team") if isinstance(profile_payload.get("team"), dict) else {}
@@ -3020,15 +3024,91 @@ class SofaScoreService:
                     source_updated_at=event_dt.isoformat(),
                 )
 
+        def resolve_tournament_name(row: Dict[str, Any]) -> str:
+            tournament_id = _safe_int(row.get("tournament_id"))
+            raw_name = _canonical_league_name(row.get("tournament_name") or "")
+            if raw_name not in {"", "Unknown"} and not re.fullmatch(r"tournament\s+\d+", raw_name, flags=re.IGNORECASE):
+                return raw_name
+
+            mapped_name = _canonical_league_name(SOFASCORE_TOURNAMENT_IDS.get(tournament_id) or "")
+            if mapped_name not in {"", "Unknown"}:
+                return mapped_name
+
+            if str(row.get("source") or "") == "profile_primary" and team_league_name not in {"", "Unknown"}:
+                return team_league_name
+
+            return raw_name
+
+        def tournament_bucket(row: Dict[str, Any]) -> Tuple[int, int]:
+            tournament_id = _safe_int(row.get("tournament_id"))
+            resolved_name = resolve_tournament_name(row)
+            normalized_name = _normalize_competition_name(resolved_name)
+            compact_name = _normalize_name(resolved_name)
+
+            if not normalized_name or normalized_name == "unknown":
+                return (9, 1)
+
+            if domestic_league_key and compact_name == domestic_league_key:
+                return (0, 0)
+
+            if tournament_id in SOFASCORE_TOURNAMENT_ID_SET and compact_name == domestic_league_key:
+                return (0, 0)
+
+            if any(
+                keyword in normalized_name
+                for keyword in (
+                    "uefa",
+                    "champions league",
+                    "europa league",
+                    "conference league",
+                    "nations league",
+                    "world cup",
+                    "sampiyonlar ligi",
+                    "avrupa ligi",
+                    "konferans ligi",
+                    "uluslar ligi",
+                )
+            ):
+                return (1, 0)
+
+            if any(
+                keyword in normalized_name
+                for keyword in (
+                    "cup",
+                    "kupasi",
+                    "kupası",
+                    "copa",
+                    "coppa",
+                    "pokal",
+                    "taça",
+                    "trophy",
+                    "super cup",
+                    "super kupa",
+                )
+            ):
+                return (2, 0)
+
+            return (3, 0)
+
+        for row in candidates:
+            row["resolved_tournament_name"] = resolve_tournament_name(row)
+
         candidates.sort(
             key=lambda row: (
+                *tournament_bucket(row),
                 int(row.get("rank", 99)),
                 0 if row.get("source") == "profile_primary" else 1,
                 -self._parse_overview_datetime(row.get("source_updated_at")).timestamp(),
-                str(row.get("tournament_name") or ""),
+                str(row.get("resolved_tournament_name") or row.get("tournament_name") or ""),
             )
         )
-        return candidates[:TEAM_OVERVIEW_MAX_TOURNAMENTS]
+        valid_candidates = [
+            row
+            for row in candidates
+            if str(row.get("resolved_tournament_name") or "").strip() not in {"", "Unknown"}
+        ]
+        selected_candidates = valid_candidates or candidates
+        return selected_candidates[:TEAM_OVERVIEW_MAX_TOURNAMENTS]
 
     async def get_team_halftime_statistics(
         self,
@@ -3904,6 +3984,7 @@ class SofaScoreService:
         updated_rows = 0
         failed_rows = 0
         last_payloads: List[Dict[str, Any]] = []
+        written_tournament_keys: set[Tuple[int, int]] = set()
         now_iso = datetime.now(timezone.utc).isoformat()
         snapshot_day = datetime.now(timezone.utc).date().isoformat()
 
@@ -3911,6 +3992,17 @@ class SofaScoreService:
             tournament_id = _safe_int(tournament.get("tournament_id"))
             season_id = _safe_int(tournament.get("season_id"))
             if tournament_id <= 0 or season_id <= 0:
+                continue
+
+            tournament_name = _canonical_league_name(
+                tournament.get("resolved_tournament_name")
+                or tournament.get("tournament_name")
+                or ""
+            )
+            if tournament_name in {"", "Unknown"} and str(tournament.get("source") or "") == "profile_primary":
+                tournament_name = _canonical_league_name(team_row.get("league") or "")
+            if tournament_name in {"", "Unknown"}:
+                failed_rows += 1
                 continue
 
             overview_stats = await self.get_team_overview_statistics(sofascore_team_id, tournament_id, season_id)
@@ -3923,7 +4015,7 @@ class SofaScoreService:
                 "team_sofascore_id": sofascore_team_id,
                 "tournament_id": tournament_id,
                 "season_id": season_id,
-                "tournament_name": str(tournament.get("tournament_name") or ""),
+                "tournament_name": tournament_name,
                 "season_name": str(tournament.get("season_name") or season_id),
                 "last_five_matches": last_five_matches,
                 "form_last_ten": form_last_ten,
@@ -3937,6 +4029,7 @@ class SofaScoreService:
             }
             if self._upsert_team_overview_cache(team_id=team_id, payload=cache_payload):
                 updated_rows += 1
+                written_tournament_keys.add((tournament_id, season_id))
                 self._upsert_team_overview_snapshot(
                     team_id=team_id,
                     payload=cache_payload,
@@ -3947,6 +4040,28 @@ class SofaScoreService:
                 failed_rows += 1
 
         if updated_rows > 0:
+            try:
+                existing_rows = (
+                    self.supabase.table("team_overview_cache")
+                    .select("id,tournament_id,season_id,tournament_name")
+                    .eq("team_id", team_id)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                existing_rows = []
+            for existing_row in existing_rows:
+                row_id = str(existing_row.get("id") or "").strip()
+                key = (_safe_int(existing_row.get("tournament_id")), _safe_int(existing_row.get("season_id")))
+                row_name = _canonical_league_name(existing_row.get("tournament_name") or "")
+                if not row_id:
+                    continue
+                if key not in written_tournament_keys or row_name in {"", "Unknown"}:
+                    try:
+                        self.supabase.table("team_overview_cache").delete().eq("id", row_id).execute()
+                    except Exception:
+                        logger.exception("team_overview_cache cleanup failed. row_id=%s", row_id)
             self._update_team_overview_sync_state(team_id, status="ready", error="", fetched_at=now_iso)
         else:
             self._update_team_overview_sync_state(

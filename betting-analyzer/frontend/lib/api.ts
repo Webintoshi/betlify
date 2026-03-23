@@ -367,6 +367,19 @@ export type TeamOverviewResponse = {
     team_data_last_fetched_at?: string | null;
     team_data_last_error?: string | null;
   };
+  recent_matches: TeamOverviewMatch[];
+  form_last_ten: {
+    wins: number;
+    draws: number;
+    losses: number;
+    points: number;
+    results: string[];
+    score_pct: number;
+  };
+  default_tournament?: {
+    tournament_id: number;
+    season_id: number;
+  } | null;
   tournaments: TeamOverviewTournament[];
 };
 

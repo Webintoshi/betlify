@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from api_football import get_service as get_api_service
-from config import ENABLE_SOFASCORE_ENRICHMENT, TRACKED_LEAGUE_IDS
+from config import ENABLE_SOFASCORE_ENRICHMENT, SOFASCORE_TOURNAMENT_IDS, TRACKED_LEAGUE_IDS
 from pi_rating import calculate_pi_ratings
 from prediction_engine.config.markets import SUPPORTED_MARKETS
 from prediction_engine.engine import run as run_prediction_engine
@@ -4704,6 +4704,134 @@ def _serialize_team_directory_item(row: Dict[str, Any], cache_row: Optional[Dict
     }
 
 
+def _is_valid_overview_tournament_name(value: Any) -> bool:
+    repaired = _repair_mojibake_text(value).strip()
+    if not repaired:
+        return False
+    compact = _normalize_team_directory_value(repaired)
+    if compact in {"", "unknown"}:
+        return False
+    return re.fullmatch(r"tournament\s+\d+", repaired, flags=re.IGNORECASE) is None
+
+
+def _resolve_overview_tournament_name(row: Dict[str, Any]) -> str:
+    raw_name = _repair_mojibake_text(row.get("tournament_name") or "")
+    if _is_valid_overview_tournament_name(raw_name):
+        return raw_name
+
+    tournament_id = int(row.get("tournament_id") or 0)
+    mapped_name = _repair_mojibake_text(SOFASCORE_TOURNAMENT_IDS.get(tournament_id) or "")
+    if _is_valid_overview_tournament_name(mapped_name):
+        return mapped_name
+
+    return raw_name
+
+
+def _overview_tournament_bucket(*, team_league: Any, tournament_name: Any) -> int:
+    normalized_name = _normalize_team_directory_value(tournament_name)
+    if normalized_name in {"", "unknown"}:
+        return 9
+
+    if normalized_name == _normalize_team_directory_value(team_league):
+        return 0
+
+    raw_name = _repair_mojibake_text(tournament_name).strip().lower()
+    if any(
+        keyword in raw_name
+        for keyword in (
+            "uefa",
+            "champions league",
+            "europa league",
+            "conference league",
+            "nations league",
+            "sampiyonlar ligi",
+            "avrupa ligi",
+            "konferans ligi",
+            "uluslar ligi",
+        )
+    ):
+        return 1
+
+    if any(
+        keyword in raw_name
+        for keyword in (
+            "cup",
+            "kupasi",
+            "kupası",
+            "copa",
+            "coppa",
+            "pokal",
+            "super cup",
+            "super kupa",
+            "trophy",
+        )
+    ):
+        return 2
+
+    return 3
+
+
+def _serialize_team_overview_tournament(row: Dict[str, Any], *, team_league: Any) -> Optional[Dict[str, Any]]:
+    tournament_name = _resolve_overview_tournament_name(row)
+    if not _is_valid_overview_tournament_name(tournament_name):
+        return None
+
+    return _repair_nested_texts(
+        {
+            "tournament_id": row.get("tournament_id"),
+            "season_id": row.get("season_id"),
+            "tournament_name": tournament_name,
+            "season_name": row.get("season_name"),
+            "last_five_matches": row.get("last_five_matches") or [],
+            "form_last_ten": row.get("form_last_ten") or {},
+            "summary_stats": row.get("summary_stats") or {},
+            "attack_stats": row.get("attack_stats") or {},
+            "passing_stats": row.get("passing_stats") or {},
+            "defending_stats": row.get("defending_stats") or {},
+            "other_stats": row.get("other_stats") or {},
+            "updated_at": row.get("updated_at"),
+            "_sort_bucket": _overview_tournament_bucket(
+                team_league=team_league,
+                tournament_name=tournament_name,
+            ),
+        }
+    )
+
+
+def _extract_latest_overview_match_datetime(rows: List[Dict[str, Any]]) -> Optional[datetime]:
+    latest: Optional[datetime] = None
+    for row in rows:
+        matches = row.get("last_five_matches")
+        if not isinstance(matches, list):
+            continue
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            raw_date = str(match.get("date") or "").strip()
+            if not raw_date:
+                continue
+            try:
+                parsed = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if latest is None or parsed > latest:
+                latest = parsed
+    return latest
+
+
+def _overview_cache_needs_force_refresh(rows: List[Dict[str, Any]]) -> bool:
+    if not rows:
+        return False
+    if not any(_is_valid_overview_tournament_name(row.get("tournament_name")) for row in rows):
+        return True
+    latest_match = _extract_latest_overview_match_datetime(rows)
+    if latest_match is None:
+        return False
+    return latest_match < (datetime.now(timezone.utc) - timedelta(days=120))
+
+
 def _fetch_team_rows(
     client: Client,
     *,
@@ -4985,25 +5113,64 @@ async def get_team_overview(team_id: str) -> Dict[str, Any]:
         except Exception:
             logger.exception("Team overview on-demand sync failed. team_id=%s", team_id)
 
-    tournaments = [
-        _repair_nested_texts(
-            {
-                "tournament_id": row.get("tournament_id"),
-                "season_id": row.get("season_id"),
-                "tournament_name": row.get("tournament_name"),
-                "season_name": row.get("season_name"),
-                "last_five_matches": row.get("last_five_matches") or [],
-                "form_last_ten": row.get("form_last_ten") or {},
-                "summary_stats": row.get("summary_stats") or {},
-                "attack_stats": row.get("attack_stats") or {},
-                "passing_stats": row.get("passing_stats") or {},
-                "defending_stats": row.get("defending_stats") or {},
-                "other_stats": row.get("other_stats") or {},
-                "updated_at": row.get("updated_at"),
-            }
+    if overview_rows and ENABLE_SOFASCORE_ENRICHMENT and sofascore is not None and _overview_cache_needs_force_refresh(overview_rows):
+        try:
+            await sofascore.sync_team_overview(team_id, sofascore_team_id, force=True)
+            overview_rows = (
+                client.table("team_overview_cache")
+                .select("*")
+                .eq("team_id", team_id)
+                .order("updated_at", desc=True)
+                .limit(20)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            logger.exception("Team overview force refresh failed. team_id=%s", team_id)
+
+    freshest_row = next(
+        (
+            row
+            for row in overview_rows
+            if isinstance(row, dict) and ((row.get("last_five_matches") or []) or (row.get("form_last_ten") or {}))
+        ),
+        None,
+    )
+    recent_matches = _repair_nested_texts((freshest_row or {}).get("last_five_matches") or [])
+    form_last_ten = _repair_nested_texts((freshest_row or {}).get("form_last_ten") or {})
+
+    tournaments: List[Dict[str, Any]] = []
+    seen_tournament_keys: set[Tuple[int, int]] = set()
+    for row in overview_rows:
+        if not isinstance(row, dict):
+            continue
+        key = (int(row.get("tournament_id") or 0), int(row.get("season_id") or 0))
+        if key in seen_tournament_keys:
+            continue
+        seen_tournament_keys.add(key)
+        serialized = _serialize_team_overview_tournament(row, team_league=team_item.get("league"))
+        if serialized is not None:
+            tournaments.append(serialized)
+
+    tournaments.sort(
+        key=lambda row: (
+            int(row.get("_sort_bucket", 99)),
+            str(row.get("tournament_name") or ""),
+            -int(row.get("season_id") or 0),
         )
-        for row in overview_rows
-    ]
+    )
+    for tournament in tournaments:
+        tournament.pop("_sort_bucket", None)
+
+    default_tournament = (
+        {
+            "tournament_id": tournaments[0].get("tournament_id"),
+            "season_id": tournaments[0].get("season_id"),
+        }
+        if tournaments
+        else None
+    )
 
     return {
         "team": {
@@ -5012,6 +5179,9 @@ async def get_team_overview(team_id: str) -> Dict[str, Any]:
             "team_data_last_fetched_at": team_row.get("team_data_last_fetched_at"),
             "team_data_last_error": team_row.get("team_data_last_error"),
         },
+        "recent_matches": recent_matches,
+        "form_last_ten": form_last_ten,
+        "default_tournament": default_tournament,
         "tournaments": tournaments,
     }
 
