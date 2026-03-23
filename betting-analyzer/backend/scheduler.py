@@ -15,6 +15,7 @@ from services.odds_scraper import OddsScraperService, get_service as get_odds_sc
 from services.prediction_evaluator import evaluate_prediction
 from services.result_processor import build_performance_summary, process_pending_predictions
 from sofascore import SofaScoreService, get_service as get_sofascore_service
+from team_comparison.cache_service import TeamComparisonCacheService
 from transfermarkt import TransfermarktService, get_service as get_transfermarkt_service
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,14 @@ class BettingScheduler:
             summary.get("roi", 0.0),
         )
         return summary
+
+    async def cleanup_team_comparison_cache(self) -> Dict[str, Any]:
+        if self.supabase is None:
+            return {"deleted": 0}
+        cache_service = TeamComparisonCacheService(self.supabase)
+        result = cache_service.cleanup_expired()
+        logger.info("Team comparison cache cleanup tamamlandi. deleted=%s", result.get("deleted", 0))
+        return result
 
     def _update_results_for_match(self, match_id: str, score_data: Dict[str, int]) -> Dict[str, int]:
         if self.supabase is None:
@@ -965,6 +974,14 @@ class BettingScheduler:
             hour=2,
             minute=0,
             id="daily-performance-stats",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.cleanup_team_comparison_cache,
+            "cron",
+            hour=3,
+            minute=20,
+            id="team-comparison-cache-cleanup",
             replace_existing=True,
         )
 

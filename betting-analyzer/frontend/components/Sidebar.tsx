@@ -25,6 +25,15 @@ const navItems = [
     )
   },
   {
+    href: "/takim-versus",
+    label: "Tak\u0131m Versus",
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 17l4-4-4-4m6 8l4-4-4-4" />
+      </svg>
+    )
+  },
+  {
     href: "/coupon",
     label: "Kupon",
     icon: (

@@ -26,6 +26,15 @@ from scheduler import BettingScheduler
 from services.odds_scraper import get_service as get_odds_scraper_service
 from services.result_processor import build_performance_summary, list_prediction_results, process_pending_predictions
 from sofascore import get_service as get_sofascore_service
+from team_comparison import TeamComparisonService
+from team_comparison.models import (
+    DEFAULT_DATA_WINDOW as TEAM_COMPARISON_DEFAULT_WINDOW,
+    DEFAULT_ROBOT as TEAM_COMPARISON_DEFAULT_ROBOT,
+    DEFAULT_SCOPE as TEAM_COMPARISON_DEFAULT_SCOPE,
+    SUPPORTED_ROBOTS as TEAM_COMPARISON_SUPPORTED_ROBOTS,
+    TeamComparisonRequest,
+    coerce_optional_date,
+)
 from transfermarkt import get_service as get_transfermarkt_service
 from weather import get_service as get_weather_service
 
@@ -157,6 +166,10 @@ def get_supabase_client() -> Client:
         return create_client(supabase_url, supabase_service_key)
     except Exception as exc:
         raise RuntimeError("Supabase credentials are invalid.") from exc
+
+
+def get_team_comparison_service() -> TeamComparisonService:
+    return TeamComparisonService(get_supabase_client())
 
 
 class AnalyzeRequest(BaseModel):
@@ -4279,6 +4292,8 @@ async def admin_sync_status() -> Dict[str, Any]:
         "team_profile_cache",
         "team_overview_cache",
         "team_overview_daily_snapshots",
+        "team_comparison_cache",
+        "team_comparison_logs",
     ]:
         try:
             rows = client.table(table_name).select("id", count="exact").limit(1).execute()
@@ -5207,6 +5222,76 @@ async def get_team_overview(team_id: str) -> Dict[str, Any]:
         "default_tournament": default_tournament,
         "tournaments": tournaments,
     }
+
+
+@app.get("/team-comparison/meta")
+async def get_team_comparison_meta() -> Dict[str, Any]:
+    try:
+        service = get_team_comparison_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return service.meta()
+
+
+@app.get("/team-comparison/cache-status")
+async def get_team_comparison_cache_status() -> Dict[str, Any]:
+    try:
+        service = get_team_comparison_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "cache": service.cache_service.status(),
+        "model_version": service.meta().get("model_version"),
+    }
+
+
+@app.post("/admin/team-comparison/cache/cleanup")
+async def cleanup_team_comparison_cache() -> Dict[str, Any]:
+    try:
+        service = get_team_comparison_service()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result = service.cache_service.cleanup_expired()
+    return {"status": "ok", **result}
+
+
+@app.get("/team-comparison")
+async def get_team_comparison(
+    home_team_id: str = Query(...),
+    away_team_id: str = Query(...),
+    scope: str = Query(default=TEAM_COMPARISON_DEFAULT_SCOPE),
+    data_window: int = Query(default=TEAM_COMPARISON_DEFAULT_WINDOW, ge=5, le=20),
+    season_mode: str = Query(default="current"),
+    tournament_id: Optional[int] = Query(default=None),
+    season_id: Optional[int] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    refresh: bool = Query(default=False),
+) -> Dict[str, Any]:
+    try:
+        service = get_team_comparison_service()
+        request = TeamComparisonRequest(
+            home_team_id=str(home_team_id or "").strip(),
+            away_team_id=str(away_team_id or "").strip(),
+            scope=str(scope or TEAM_COMPARISON_DEFAULT_SCOPE).strip(),
+            data_window=int(data_window or TEAM_COMPARISON_DEFAULT_WINDOW),
+            season_mode=str(season_mode or "current").strip() or "current",
+            tournament_id=tournament_id,
+            season_id=season_id,
+            date_from=coerce_optional_date(date_from),
+            date_to=coerce_optional_date(date_to),
+            refresh=bool(refresh),
+        )
+        payload = service.compare(request)
+        return payload
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("team-comparison failed. home=%s away=%s", home_team_id, away_team_id)
+        raise HTTPException(status_code=500, detail="Team comparison failed.") from exc
 
 
 @app.get("/matches/today")

@@ -383,6 +383,169 @@ export type TeamOverviewResponse = {
   tournaments: TeamOverviewTournament[];
 };
 
+export type TeamComparisonMetaResponse = {
+  default_scope: string;
+  default_data_window: number;
+  default_robot: string;
+  model_version: string;
+  supported_scopes: string[];
+  supported_windows: number[];
+  supported_robots: string[];
+  team_selector_source: string;
+  featured_teams: Array<{
+    id: string;
+    name: string;
+    league: string;
+    country: string;
+  }>;
+};
+
+export type TeamComparisonCard = {
+  key: string;
+  label: string;
+  home_score: number;
+  away_score: number;
+  edge: number;
+  winner: "home" | "away" | "draw";
+  winner_label: string;
+  explanation: string;
+};
+
+export type TeamComparisonScenario = {
+  key: string;
+  title: string;
+  probability_score: number;
+  favored_side: string;
+  reasons: string[];
+  risk_factors: string[];
+  first_goal_window: string;
+  tempo: string;
+};
+
+export type TeamComparisonScoreline = {
+  score: string;
+  home_goals: number;
+  away_goals: number;
+  probability: number;
+};
+
+export type TeamComparisonRobotOutput = {
+  name: string;
+  spec_version: string;
+  report_blocks: Array<{
+    title: string;
+    body: string;
+  }>;
+  summary_card: {
+    favorite_team: string;
+    power_difference_pct: number;
+    recommended_scenario: string;
+    most_likely_score: string;
+    confidence_label: string;
+    risk_warning: string;
+  };
+  confidence_note: string;
+  data_gaps: string[];
+};
+
+export type TeamComparisonResponse = {
+  request: {
+    home_team_id: string;
+    away_team_id: string;
+    scope: string;
+    data_window: number;
+    season_mode: string;
+    tournament_id?: number | null;
+    season_id?: number | null;
+    date_from?: string | null;
+    date_to?: string | null;
+    refresh: boolean;
+  };
+  header_summary: {
+    home_team: TeamDirectoryItem;
+    away_team: TeamDirectoryItem;
+    league_context: string;
+    comparison_date: string;
+    data_window: number;
+    confidence_score: number;
+    data_quality_score: number;
+    cross_league: boolean;
+    fixture_context?: Record<string, unknown>;
+  };
+  shared_comparison: {
+    cards: TeamComparisonCard[];
+    axes: TeamComparisonCard[];
+    comparison_edge: number;
+  };
+  probability_block: {
+    home_edge: number;
+    draw_tendency: number;
+    away_threat_level: number;
+    over_tendency: number;
+    btts_tendency: number;
+    top_5_scorelines: TeamComparisonScoreline[];
+    top_3_scenarios: TeamComparisonScenario[];
+    one_x_two: {
+      home: number;
+      draw: number;
+      away: number;
+    };
+    totals: {
+      over_1_5: number;
+      under_1_5: number;
+      over_2_5: number;
+      under_2_5: number;
+      over_3_5: number;
+      under_3_5: number;
+    };
+    btts: {
+      yes: number;
+      no: number;
+    };
+    lambda_home: number;
+    lambda_away: number;
+    tempo_class: string;
+    first_goal_window: string;
+  };
+  visualization: {
+    radar_values: {
+      home: Record<string, number>;
+      away: Record<string, number>;
+    };
+    bar_comparison: TeamComparisonCard[];
+    scenario_bars: TeamComparisonScenario[];
+  };
+  robots: {
+    ana: TeamComparisonRobotOutput;
+    bma: TeamComparisonRobotOutput;
+    gma: TeamComparisonRobotOutput;
+  };
+  data_quality: {
+    score: number;
+    components: Record<string, number>;
+  };
+  confidence: {
+    confidence_score: number;
+    data_quality_score: number;
+    confidence_band: string;
+    components: Record<string, number>;
+    warnings: string[];
+  };
+  data_gaps: string[];
+  meta: {
+    model_version: string;
+    cache_hit: boolean;
+    selected_tournament?: {
+      tournament_id?: number;
+      season_id?: number;
+      tournament_name?: string;
+      season_name?: string;
+    } | null;
+    feature_sources: Record<string, string>;
+    included_match_ids: string[];
+  };
+};
+
 export type CouponSelectionPayload = {
   match_id: string;
   home_team: string;
@@ -566,6 +729,52 @@ export async function getTeam(teamId: string): Promise<TeamDetailResponse> {
 
 export async function getTeamOverview(teamId: string): Promise<TeamOverviewResponse> {
   return fetchJson<TeamOverviewResponse>(`/teams/${teamId}/overview`);
+}
+
+export async function getTeamComparisonMeta(): Promise<TeamComparisonMetaResponse> {
+  return fetchJson<TeamComparisonMetaResponse>("/team-comparison/meta");
+}
+
+export async function getTeamComparison(params: {
+  homeTeamId: string;
+  awayTeamId: string;
+  scope?: string;
+  dataWindow?: number;
+  seasonMode?: string;
+  tournamentId?: number;
+  seasonId?: number;
+  dateFrom?: string;
+  dateTo?: string;
+  refresh?: boolean;
+}): Promise<TeamComparisonResponse> {
+  const search = new URLSearchParams();
+  search.set("home_team_id", params.homeTeamId);
+  search.set("away_team_id", params.awayTeamId);
+  if (params.scope) {
+    search.set("scope", params.scope);
+  }
+  if (params.dataWindow) {
+    search.set("data_window", String(params.dataWindow));
+  }
+  if (params.seasonMode) {
+    search.set("season_mode", params.seasonMode);
+  }
+  if (typeof params.tournamentId === "number") {
+    search.set("tournament_id", String(params.tournamentId));
+  }
+  if (typeof params.seasonId === "number") {
+    search.set("season_id", String(params.seasonId));
+  }
+  if (params.dateFrom) {
+    search.set("date_from", params.dateFrom);
+  }
+  if (params.dateTo) {
+    search.set("date_to", params.dateTo);
+  }
+  if (params.refresh) {
+    search.set("refresh", "true");
+  }
+  return fetchJson<TeamComparisonResponse>(`/team-comparison?${search.toString()}`);
 }
 
 export async function createCoupon(selections: CouponSelectionPayload[]): Promise<{
