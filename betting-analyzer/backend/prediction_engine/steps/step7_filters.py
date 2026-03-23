@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from prediction_engine.config.settings import LEAGUE_TRUST, MIN_CONFIDENCE
+from prediction_engine.config.settings import LEAGUE_TRUST, MIN_CONFIDENCE, resolve_league_settings_key
 
 
 def compute_confidence(
@@ -13,6 +13,7 @@ def compute_confidence(
     lam: float,
     mu: float,
 ) -> float:
+    resolved_league = resolve_league_settings_key(league)
     score = 0.0
 
     home_last6 = home_stats.get("last6", []) or []
@@ -34,7 +35,7 @@ def compute_confidence(
     score += 20 if book_count >= 8 else 15 if book_count >= 5 else 10 if book_count >= 3 else 5 if book_count >= 1 else 0
     score += 5 if any(str(book.get("book", "")).lower() in {"betfair_exchange", "sbobet", "pinnacle"} for book in bookmakers) else 0
 
-    score *= LEAGUE_TRUST.get(league, LEAGUE_TRUST["default"])
+    score *= LEAGUE_TRUST.get(resolved_league, LEAGUE_TRUST["default"])
 
     if len(home_last6) < 3:
         score -= 10

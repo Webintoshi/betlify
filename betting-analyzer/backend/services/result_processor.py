@@ -109,7 +109,7 @@ def _update_match_result_columns(client: Client, match_id: str, result: Dict[str
 def _fetch_predictions(client: Client, *, limit: int, lookback_days: int) -> List[Dict[str, Any]]:
     query = (
         client.table("predictions")
-        .select("id,match_id,market_type,predicted_outcome,created_at")
+        .select("id,match_id,market_type,predicted_outcome,created_at,recommended")
         .order("created_at", desc=True)
         .limit(limit)
     )
@@ -118,9 +118,16 @@ def _fetch_predictions(client: Client, *, limit: int, lookback_days: int) -> Lis
         query = query.gte("created_at", lower_bound)
     rows = query.execute().data or []
     filtered: List[Dict[str, Any]] = []
+    seen_match_ids: set[str] = set()
     for row in rows:
+        if not bool(row.get("recommended", False)):
+            continue
+        match_id = str(row.get("match_id") or "").strip()
+        if not match_id or match_id in seen_match_ids:
+            continue
         market_name = str(row.get("market_type") or row.get("predicted_outcome") or "").strip().upper()
         if market_name in SUPPORTED_MARKET_SET:
+            seen_match_ids.add(match_id)
             filtered.append(row)
     return filtered
 

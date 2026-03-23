@@ -3,7 +3,7 @@
 import numpy as np
 from scipy.stats import poisson
 
-from prediction_engine.config.settings import HOME_ADVANTAGE, HT_LAMBDA_RATIO, RHO_BY_LEAGUE
+from prediction_engine.config.settings import HOME_ADVANTAGE, HT_LAMBDA_RATIO, RHO_BY_LEAGUE, resolve_league_settings_key
 
 
 def rho_correction(x: int, y: int, lam: float, mu: float, rho: float) -> float:
@@ -31,7 +31,8 @@ def score_matrix(lam: float, mu: float, rho: float, max_goals: int = 8) -> np.nd
 
 
 def compute_probabilities(home_xg: float, away_xg: float, league: str = "default") -> tuple[dict, dict]:
-    rho = RHO_BY_LEAGUE.get(league, RHO_BY_LEAGUE["default"])
+    resolved_league = resolve_league_settings_key(league)
+    rho = RHO_BY_LEAGUE.get(resolved_league, RHO_BY_LEAGUE["default"])
 
     lam = max(0.3, min(HOME_ADVANTAGE * home_xg, 4.5))
     mu = max(0.3, min(away_xg, 4.0))

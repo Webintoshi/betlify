@@ -4062,7 +4062,15 @@ class SofaScoreService:
                         self.supabase.table("team_overview_cache").delete().eq("id", row_id).execute()
                     except Exception:
                         logger.exception("team_overview_cache cleanup failed. row_id=%s", row_id)
-            self._update_team_overview_sync_state(team_id, status="ready", error="", fetched_at=now_iso)
+            if failed_rows > 0:
+                self._update_team_overview_sync_state(
+                    team_id,
+                    status="stale",
+                    error=f"partial_overview_rows:{failed_rows}",
+                    fetched_at=now_iso,
+                )
+            else:
+                self._update_team_overview_sync_state(team_id, status="ready", error="", fetched_at=now_iso)
         else:
             self._update_team_overview_sync_state(
                 team_id,

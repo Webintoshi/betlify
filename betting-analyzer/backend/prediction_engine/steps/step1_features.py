@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
-from prediction_engine.config.settings import LEAGUE_TRUST
+from prediction_engine.config.settings import LEAGUE_TRUST, resolve_league_settings_key
 
 
 def build_features(home_stats: dict, away_stats: dict, h2h: dict, league: str) -> dict:
+    resolved_league = resolve_league_settings_key(league)
+
     def form_score(results: list) -> float:
         mapping = {"W": 3, "D": 1, "L": 0}
         cleaned = [str(item).upper() for item in (results or [])]
@@ -26,6 +28,6 @@ def build_features(home_stats: dict, away_stats: dict, h2h: dict, league: str) -
         "h2h_home_goals": float(h2h.get("avg_home_goals", 1.4) or 1.4),
         "h2h_away_goals": float(h2h.get("avg_away_goals", 1.1) or 1.1),
         "h2h_count": len(h2h.get("matches", [])),
-        "league_trust": LEAGUE_TRUST.get(league, LEAGUE_TRUST["default"]),
-        "league": league,
+        "league_trust": LEAGUE_TRUST.get(resolved_league, LEAGUE_TRUST["default"]),
+        "league": resolved_league,
     }

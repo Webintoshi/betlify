@@ -1440,10 +1440,6 @@ def _fetch_latest_prediction_for_match(client: Client, match_id: str) -> Optiona
             continue
         if bool(row.get("recommended")):
             return row
-    for row in rows:
-        market_type = str(row.get("market_type") or "").strip().upper()
-        if market_type and market_type in SUPPORTED_MARKET_SET:
-            return row
     return None
 
 
@@ -2565,47 +2561,74 @@ def _save_predictions(
     lambda_payload: Optional[Mapping[str, float]] = None,
 ) -> None:
     best = ev_result.get("best_market")
-    if not best:
-        return
-    payload = {
-        "match_id": match_id,
-        "market_type": best["market_type"],
-        "predicted_outcome": best["predicted_outcome"],
-        "confidence_score": ev_result["confidence_score"],
-        "ev_percentage": best["ev_percentage"],
-        "recommended": bool(best["recommended"]),
-        "kelly_pct": float(best.get("kelly_pct", 0.0) or 0.0),
-        "lambda_home": float((lambda_payload or {}).get("home", 0.0) or 0.0),
-        "lambda_away": float((lambda_payload or {}).get("away", 0.0) or 0.0),
-        "ht_lambda_home": float((lambda_payload or {}).get("ht_home", 0.0) or 0.0),
-        "ht_lambda_away": float((lambda_payload or {}).get("ht_away", 0.0) or 0.0),
-    }
     try:
-        try:
-            existing = (
-                client.table("predictions")
-                .select("id")
-                .eq("match_id", match_id)
-                .eq("market_type", payload["market_type"])
-                .limit(1)
+        existing_rows = (
+            client.table("predictions")
+            .select("id,market_type")
+            .eq("match_id", match_id)
+            .execute()
+            .data
+            or []
+        )
+        existing_ids = [str(row.get("id") or "").strip() for row in existing_rows if row.get("id")]
+        resolved_ids: set[str] = set()
+        if existing_ids:
+            resolved_rows = (
+                client.table("results_tracker")
+                .select("prediction_id")
+                .in_("prediction_id", existing_ids)
                 .execute()
+                .data
+                or []
             )
-            if existing.data:
-                client.table("predictions").update(payload).eq("id", existing.data[0]["id"]).execute()
+            resolved_ids = {
+                str(row.get("prediction_id") or "").strip()
+                for row in resolved_rows
+                if row.get("prediction_id")
+            }
+        removable_ids = [prediction_id for prediction_id in existing_ids if prediction_id not in resolved_ids]
+        for prediction_id in removable_ids:
+            client.table("predictions").delete().eq("id", prediction_id).execute()
+        unresolved_existing_by_market = {
+            str(row.get("market_type") or "").strip().upper(): str(row.get("id") or "").strip()
+            for row in existing_rows
+            if row.get("id")
+            and str(row.get("id") or "").strip() not in resolved_ids
+            and str(row.get("market_type") or "").strip()
+        }
+
+        if not best or not bool(best.get("recommended")):
+            client.table("matches").update(
+                {
+                    "confidence_score": ev_result["confidence_score"],
+                    "best_bet": None,
+                }
+            ).eq("id", str(match_id)).execute()
+            return
+
+        payload = {
+            "match_id": match_id,
+            "market_type": best["market_type"],
+            "predicted_outcome": best["predicted_outcome"],
+            "confidence_score": ev_result["confidence_score"],
+            "ev_percentage": best["ev_percentage"],
+            "recommended": True,
+            "kelly_pct": float(best.get("kelly_pct", 0.0) or 0.0),
+            "lambda_home": float((lambda_payload or {}).get("home", 0.0) or 0.0),
+            "lambda_away": float((lambda_payload or {}).get("away", 0.0) or 0.0),
+            "ht_lambda_home": float((lambda_payload or {}).get("ht_home", 0.0) or 0.0),
+            "ht_lambda_away": float((lambda_payload or {}).get("ht_away", 0.0) or 0.0),
+        }
+        existing_prediction_id = unresolved_existing_by_market.get(str(payload["market_type"]).strip().upper())
+        try:
+            if existing_prediction_id:
+                client.table("predictions").update(payload).eq("id", existing_prediction_id).execute()
             else:
                 client.table("predictions").insert(payload).execute()
         except Exception:
             fallback = {k: v for k, v in payload.items() if k not in {"kelly_pct", "lambda_home", "lambda_away", "ht_lambda_home", "ht_lambda_away"}}
-            existing = (
-                client.table("predictions")
-                .select("id")
-                .eq("match_id", match_id)
-                .eq("market_type", fallback["market_type"])
-                .limit(1)
-                .execute()
-            )
-            if existing.data:
-                client.table("predictions").update(fallback).eq("id", existing.data[0]["id"]).execute()
+            if existing_prediction_id:
+                client.table("predictions").update(fallback).eq("id", existing_prediction_id).execute()
             else:
                 client.table("predictions").insert(fallback).execute()
         best_market_name = str(best.get("market_type") or "")
@@ -5194,14 +5217,13 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     today = datetime.now(scheduler.timezone).date().isoformat()
-    tomorrow = (datetime.now(scheduler.timezone).date() + timedelta(days=1)).isoformat()
     try:
         try:
             result = (
                 client.table("matches")
                 .select("id,league,match_date,status,home_team_id,away_team_id,confidence_score,best_bet")
                 .gte("match_date", f"{today}T00:00:00")
-                .lte("match_date", f"{tomorrow}T23:59:59")
+                .lte("match_date", f"{today}T23:59:59")
                 .order("match_date")
                 .execute()
             )
@@ -5210,7 +5232,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
                 client.table("matches")
                 .select("id,league,match_date,status,home_team_id,away_team_id")
                 .gte("match_date", f"{today}T00:00:00")
-                .lte("match_date", f"{tomorrow}T23:59:59")
+                .lte("match_date", f"{today}T23:59:59")
                 .order("match_date")
                 .execute()
             )
@@ -5247,6 +5269,8 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
             )
             for row in prediction_rows:
                 match_id = str(row.get("match_id") or "").strip()
+                if not bool(row.get("recommended", False)):
+                    continue
                 if match_id and match_id not in prediction_map:
                     prediction_map[match_id] = row
         except Exception:
@@ -5261,13 +5285,9 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
             if prediction.get("confidence_score") is not None
             else row.get("confidence_score", 0.0) or 0.0
         )
-        market_type = str(
-            prediction.get("market_type")
-            or row.get("best_bet")
-            or "MS1"
-        )
         ev_percentage = float(prediction.get("ev_percentage", 0.0) or 0.0)
         recommended_flag = bool(prediction.get("recommended", False)) and confidence_score >= float(min_confidence)
+        market_type = str(prediction.get("market_type") or "").strip() if recommended_flag else ""
         items.append(
             {
                 "match_id": row["id"],
@@ -5280,7 +5300,7 @@ async def list_todays_matches(min_confidence: float = Query(default=60, ge=0, le
                 "away_logo_url": (teams_map.get(row["away_team_id"], {}) or {}).get("logo_url"),
                 "confidence_score": round(confidence_score, 2),
                 "recommended": recommended_flag,
-                "market_type": market_type,
+                "market_type": market_type or None,
                 "ev_percentage": ev_percentage,
             }
         )
