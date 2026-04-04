@@ -2,6 +2,65 @@ import { NextRequest } from "next/server";
 
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.BACKEND_PROXY_TIMEOUT_MS ?? "8000", 10) || 8000;
 
+function buildFallbackResponse(pathSegments: string[]): Response | null {
+  const path = pathSegments.join("/").toLowerCase();
+
+  if (path === "history") {
+    return new Response(
+      JSON.stringify({
+        count: 0,
+        items: [],
+        summary: {
+          total_predictions: 0,
+          correct_predictions: 0,
+          wrong_predictions: 0,
+          accuracy_percentage: 0,
+          weekly_accuracy_percentage: 0,
+          total_coupons: 0
+        },
+        filters: {
+          start_date: null,
+          end_date: null,
+          market_type: null,
+          correct: null
+        },
+        backend_available: false
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", "x-backend-fallback": "history" }
+      }
+    );
+  }
+
+  if (path === "health") {
+    return new Response(
+      JSON.stringify({
+        status: "degraded",
+        supabase_connected: false,
+        scheduler: { running: false, jobs: [] },
+        api_football_remaining: null,
+        the_odds_remaining: null,
+        api_keys: {
+          api_football: false,
+          the_odds: false,
+          openweather: false,
+          supabase_service: false
+        },
+        error: "Backend unavailable",
+        time: new Date().toISOString(),
+        backend_available: false
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", "x-backend-fallback": "health" }
+      }
+    );
+  }
+
+  return null;
+}
+
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/$/, "");
 }
@@ -75,6 +134,13 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
     });
     clearTimeout(timeoutId);
 
+    if (!upstream.ok && upstream.status >= 500 && request.method === "GET") {
+      const fallback = buildFallbackResponse(pathSegments);
+      if (fallback) {
+        return fallback;
+      }
+    }
+
     const responseHeaders = new Headers(upstream.headers);
     return new Response(upstream.body, {
       status: upstream.status,
@@ -82,6 +148,12 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
     });
   } catch (error) {
     clearTimeout(timeoutId);
+    if (request.method === "GET") {
+      const fallback = buildFallbackResponse(pathSegments);
+      if (fallback) {
+        return fallback;
+      }
+    }
     const message = error instanceof Error ? error.message : "unknown error";
     return new Response(JSON.stringify({ detail: `Backend proxy error: ${message}`, upstream: base }), {
       status: 502,
