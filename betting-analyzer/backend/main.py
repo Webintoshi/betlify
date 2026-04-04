@@ -15,10 +15,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from supabase import Client, create_client
+from supabase import Client
 
 from api_football import get_service as get_api_service
 from config import ENABLE_SOFASCORE_ENRICHMENT, SOFASCORE_TOURNAMENT_IDS, TRACKED_LEAGUE_IDS
+from local_db_client import build_supabase_client
 from pi_rating import calculate_pi_ratings
 from prediction_engine.config.markets import SUPPORTED_MARKETS
 from prediction_engine.engine import run as run_prediction_engine
@@ -158,14 +159,10 @@ app.add_middleware(
 
 
 def get_supabase_client() -> Client:
-    supabase_url = os.getenv("SUPABASE_URL", "")
-    supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY", "")
-    if not supabase_url or not supabase_service_key or "BURAYA_" in supabase_service_key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY are required.")
-    try:
-        return create_client(supabase_url, supabase_service_key)
-    except Exception as exc:
-        raise RuntimeError("Supabase credentials are invalid.") from exc
+    client = build_supabase_client(required=True)
+    if client is None:
+        raise RuntimeError("Database client is unavailable.")
+    return client
 
 
 def get_team_comparison_service() -> TeamComparisonService:
@@ -3364,7 +3361,7 @@ async def healthcheck() -> Dict[str, Any]:
             "the_odds": bool(os.getenv("ODDS_API_IO_KEY") or os.getenv("THE_ODDS_API_KEY")),
             "sofascore_cookie": bool(os.getenv("SOFASCORE_COOKIE")),
             "openweather": bool(os.getenv("OPENWEATHER_API_KEY")) and "BURAYA_" not in str(os.getenv("OPENWEATHER_API_KEY")),
-            "supabase_service": bool(os.getenv("SUPABASE_SERVICE_KEY")),
+            "supabase_service": bool(os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("LOCAL_SUPABASE_SERVICE_KEY")),
         },
         "error": error_message,
         "time": datetime.now().isoformat(),
@@ -4456,8 +4453,11 @@ async def get_history(
         match_id = row.get("match_id")
         result_row = results_map.get(prediction_id, {})
         was_correct = result_row.get("was_correct")
-        if correct_filter is not None and bool(was_correct) is not correct_filter:
-            continue
+        if correct_filter is not None:
+            if was_correct is None:
+                continue
+            if bool(was_correct) is not correct_filter:
+                continue
         match_row = matches_map.get(match_id, {})
         home_team = teams_map.get(match_row.get("home_team_id"), "Ev Sahibi")
         away_team = teams_map.get(match_row.get("away_team_id"), "Deplasman")
