@@ -74,27 +74,22 @@ function isAbsoluteHttpUrl(value: string): boolean {
   }
 }
 
-function resolveBackendBaseUrl(): string | null {
+function resolveBackendBaseUrls(): string[] {
   const candidates = [
-    process.env.BACKEND_INTERNAL_URL,
     process.env.SERVICE_URL_BACKEND,
     process.env.BACKEND_URL,
     process.env.NEXT_PUBLIC_BACKEND_URL,
+    process.env.BACKEND_INTERNAL_URL,
     "http://localhost:8000"
   ];
 
-  for (const raw of candidates) {
-    const value = String(raw ?? "").trim();
-    if (!value) {
-      continue;
-    }
-    if (!isAbsoluteHttpUrl(value)) {
-      continue;
-    }
-    return trimTrailingSlash(value);
-  }
+  const resolved = candidates
+    .map((raw) => String(raw ?? "").trim())
+    .filter((value) => value.length > 0)
+    .filter((value) => isAbsoluteHttpUrl(value))
+    .map((value) => trimTrailingSlash(value));
 
-  return null;
+  return Array.from(new Set(resolved));
 }
 
 function buildTargetUrl(request: NextRequest, pathSegments: string[], base: string): URL {
@@ -107,59 +102,66 @@ function buildTargetUrl(request: NextRequest, pathSegments: string[], base: stri
 }
 
 async function proxy(request: NextRequest, pathSegments: string[]): Promise<Response> {
-  const base = resolveBackendBaseUrl();
-  if (!base) {
+  const bases = resolveBackendBaseUrls();
+  if (!bases.length) {
     return new Response(JSON.stringify({ detail: "Backend proxy is not configured." }), {
       status: 503,
       headers: { "Content-Type": "application/json" }
     });
   }
 
-  const targetUrl = buildTargetUrl(request, pathSegments, base);
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
+  const errors: string[] = [];
 
-  try {
-    const upstream = await fetch(targetUrl.toString(), {
-      method: request.method,
-      headers,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
-      cache: "no-store",
-      redirect: "manual",
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
+  for (const base of bases) {
+    const targetUrl = buildTargetUrl(request, pathSegments, base);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-    if (!upstream.ok && upstream.status >= 500 && request.method === "GET") {
-      const fallback = buildFallbackResponse(pathSegments);
-      if (fallback) {
-        return fallback;
+    try {
+      const upstream = await fetch(targetUrl.toString(), {
+        method: request.method,
+        headers,
+        body,
+        cache: "no-store",
+        redirect: "manual",
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (upstream.status >= 500) {
+        errors.push(`${base} => HTTP ${upstream.status}`);
+        continue;
       }
-    }
 
-    const responseHeaders = new Headers(upstream.headers);
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: responseHeaders
-    });
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (request.method === "GET") {
-      const fallback = buildFallbackResponse(pathSegments);
-      if (fallback) {
-        return fallback;
-      }
+      const responseHeaders = new Headers(upstream.headers);
+      responseHeaders.set("x-backend-upstream", base);
+      return new Response(upstream.body, {
+        status: upstream.status,
+        headers: responseHeaders
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const message = error instanceof Error ? error.message : "unknown error";
+      errors.push(`${base} => ${message}`);
     }
-    const message = error instanceof Error ? error.message : "unknown error";
-    return new Response(JSON.stringify({ detail: `Backend proxy error: ${message}`, upstream: base }), {
-      status: 502,
-      headers: { "Content-Type": "application/json" }
-    });
   }
+
+  if (request.method === "GET") {
+    const fallback = buildFallbackResponse(pathSegments);
+    if (fallback) {
+      return fallback;
+    }
+  }
+
+  return new Response(JSON.stringify({ detail: "Backend proxy error: all upstream targets failed", tried: bases, errors }), {
+    status: 502,
+    headers: { "Content-Type": "application/json" }
+  });
 }
 
 type RouteContext = {
