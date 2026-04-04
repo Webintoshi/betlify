@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 const REQUEST_TIMEOUT_MS = 5000;
+const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504]);
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/$/, "");
@@ -17,12 +18,14 @@ function isAbsoluteHttpUrl(value: string): boolean {
 
 function resolveBackendCandidates(): string[] {
   const candidates = [
-    process.env.BACKEND_INTERNAL_URL,
     process.env.SERVICE_URL_BACKEND,
+    process.env.BACKEND_INTERNAL_URL,
     process.env.BACKEND_URL,
     process.env.NEXT_PUBLIC_BACKEND_URL,
     "http://backend:8000",
+    "http://backend",
     "http://api:8000",
+    "http://api",
     "http://127.0.0.1:8000",
     "http://localhost:8000"
   ];
@@ -71,8 +74,15 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
         signal: controller.signal
       });
       clearTimeout(timeoutId);
+      if (RETRYABLE_GATEWAY_STATUSES.has(upstream.status)) {
+        const responseText = await upstream.text();
+        const compact = responseText.length > 180 ? `${responseText.slice(0, 180)}...` : responseText;
+        errors.push(`${base} => upstream ${upstream.status}${compact ? `: ${compact}` : ""}`);
+        continue;
+      }
 
       const responseHeaders = new Headers(upstream.headers);
+      responseHeaders.set("x-backend-target", base);
       return new Response(upstream.body, {
         status: upstream.status,
         headers: responseHeaders
