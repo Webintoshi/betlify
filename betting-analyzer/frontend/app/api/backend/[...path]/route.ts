@@ -58,6 +58,21 @@ function buildFallbackResponse(pathSegments: string[]): Response | null {
     );
   }
 
+  if (path === "matches/today") {
+    return new Response(
+      JSON.stringify({
+        count: 0,
+        tracked_leagues: 0,
+        matches: [],
+        backend_available: false
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", "x-backend-fallback": "matches_today" }
+      }
+    );
+  }
+
   return null;
 }
 
