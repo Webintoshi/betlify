@@ -666,7 +666,36 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    const fallback = `HTTP ${response.status}`;
+    let detail = text.trim() || fallback;
+
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown };
+      if (typeof parsed?.detail === "string" && parsed.detail.trim()) {
+        detail = parsed.detail.trim();
+      }
+    } catch {
+      // Keep original text when not JSON.
+    }
+
+    const normalized = detail.toLowerCase();
+    const isBackendUnavailable =
+      response.status >= 500 &&
+      (normalized.includes("backend proxy") ||
+        normalized.includes("upstream") ||
+        normalized.includes("fetch failed") ||
+        normalized.includes("service unavailable") ||
+        normalized.includes("not configured"));
+
+    if (isBackendUnavailable) {
+      throw new Error("Backend servisine su an ulasilamiyor. Lutfen daha sonra tekrar deneyin.");
+    }
+
+    if (detail.startsWith("<!DOCTYPE")) {
+      throw new Error(fallback);
+    }
+
+    throw new Error(detail);
   }
   return (await response.json()) as T;
 }

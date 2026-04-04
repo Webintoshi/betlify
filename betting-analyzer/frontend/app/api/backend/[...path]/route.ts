@@ -1,12 +1,44 @@
 import { NextRequest } from "next/server";
 
-const BACKEND_INTERNAL_URL =
-  process.env.BACKEND_INTERNAL_URL ??
-  process.env.NEXT_PUBLIC_BACKEND_URL ??
-  "http://localhost:8000";
+const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.BACKEND_PROXY_TIMEOUT_MS ?? "8000", 10) || 8000;
 
-function buildTargetUrl(request: NextRequest, pathSegments: string[]): URL {
-  const base = BACKEND_INTERNAL_URL.replace(/\/$/, "");
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/$/, "");
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function resolveBackendBaseUrl(): string | null {
+  const candidates = [
+    process.env.BACKEND_INTERNAL_URL,
+    process.env.SERVICE_URL_BACKEND,
+    process.env.BACKEND_URL,
+    process.env.NEXT_PUBLIC_BACKEND_URL,
+    "http://localhost:8000"
+  ];
+
+  for (const raw of candidates) {
+    const value = String(raw ?? "").trim();
+    if (!value) {
+      continue;
+    }
+    if (!isAbsoluteHttpUrl(value)) {
+      continue;
+    }
+    return trimTrailingSlash(value);
+  }
+
+  return null;
+}
+
+function buildTargetUrl(request: NextRequest, pathSegments: string[], base: string): URL {
   const path = pathSegments.join("/");
   const target = new URL(`${base}/${path}`);
   request.nextUrl.searchParams.forEach((value, key) => {
@@ -16,10 +48,21 @@ function buildTargetUrl(request: NextRequest, pathSegments: string[]): URL {
 }
 
 async function proxy(request: NextRequest, pathSegments: string[]): Promise<Response> {
-  const targetUrl = buildTargetUrl(request, pathSegments);
+  const base = resolveBackendBaseUrl();
+  if (!base) {
+    return new Response(JSON.stringify({ detail: "Backend proxy is not configured." }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  const targetUrl = buildTargetUrl(request, pathSegments, base);
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
     const upstream = await fetch(targetUrl.toString(), {
@@ -27,8 +70,10 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
       headers,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
       cache: "no-store",
-      redirect: "manual"
+      redirect: "manual",
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
     const responseHeaders = new Headers(upstream.headers);
     return new Response(upstream.body, {
@@ -36,8 +81,9 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
       headers: responseHeaders
     });
   } catch (error) {
+    clearTimeout(timeoutId);
     const message = error instanceof Error ? error.message : "unknown error";
-    return new Response(JSON.stringify({ detail: `Backend proxy error: ${message}` }), {
+    return new Response(JSON.stringify({ detail: `Backend proxy error: ${message}`, upstream: base }), {
       status: 502,
       headers: { "Content-Type": "application/json" }
     });

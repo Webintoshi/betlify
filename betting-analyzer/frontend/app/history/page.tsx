@@ -47,6 +47,7 @@ function isBackendUnavailableError(error: unknown): boolean {
     normalized.includes("backend proxy error") ||
     normalized.includes("upstream targets failed") ||
     normalized.includes("fetch failed") ||
+    normalized.includes("backend servisine su an ulasilamiyor") ||
     normalized.includes("http 502") ||
     normalized.includes("http 503")
   );
