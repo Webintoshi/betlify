@@ -1,7 +1,5 @@
 import { NextRequest } from "next/server";
 
-const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.BACKEND_PROXY_TIMEOUT_MS ?? "8000", 10) || 8000;
-
 function buildFallbackResponse(pathSegments: string[]): Response | null {
   const path = pathSegments.join("/").toLowerCase();
 
@@ -134,8 +132,6 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
 
   for (const base of bases) {
     const targetUrl = buildTargetUrl(request, pathSegments, base);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
       const upstream = await fetch(targetUrl.toString(), {
@@ -143,10 +139,8 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
         headers,
         body,
         cache: "no-store",
-        redirect: "manual",
-        signal: controller.signal
+        redirect: "manual"
       });
-      clearTimeout(timeoutId);
 
       if (upstream.status >= 500) {
         errors.push(`${base} => HTTP ${upstream.status}`);
@@ -160,7 +154,6 @@ async function proxy(request: NextRequest, pathSegments: string[]): Promise<Resp
         headers: responseHeaders
       });
     } catch (error) {
-      clearTimeout(timeoutId);
       const message = error instanceof Error ? error.message : "unknown error";
       errors.push(`${base} => ${message}`);
     }
