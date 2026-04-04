@@ -20,6 +20,20 @@ function t(value: string): string {
   return repairDisplayText(value);
 }
 
+function getScopeLabel(scope: string): string {
+  const labels: Record<string, string> = {
+    primary_current: "Birincil turnuva (guncel)",
+    all_competitions: "Tum turnuvalar",
+    common_tournament: "Ortak turnuva"
+  };
+
+  if (labels[scope]) {
+    return labels[scope];
+  }
+
+  return repairDisplayText(scope.replace(/_/g, " "));
+}
+
 function TeamOption({ item, onSelect }: { item: TeamDirectoryItem; onSelect: (item: TeamDirectoryItem) => void }) {
   return (
     <button
@@ -224,7 +238,7 @@ export function ComparisonControls({
           <label className="text-xs font-black uppercase tracking-wide text-foreground-muted">{t(TR.comparisonScope)}</label>
           <select value={scope} onChange={(event) => setScope(event.target.value)} className="w-full rounded-xl border border-card-border bg-background-secondary px-4 py-3 text-sm font-bold text-foreground-primary outline-none transition-colors focus:border-accent">
             {meta.supported_scopes.map((item) => (
-              <option key={item} value={item}>{item}</option>
+              <option key={item} value={item}>{getScopeLabel(item)}</option>
             ))}
           </select>
         </div>
