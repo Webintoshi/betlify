@@ -25,6 +25,33 @@ type MarketMetric = {
   accuracy: number;
 };
 
+function createEmptyHistory(): HistoryResponse {
+  return {
+    count: 0,
+    items: [],
+    summary: {
+      total_predictions: 0,
+      correct_predictions: 0,
+      wrong_predictions: 0,
+      accuracy_percentage: 0,
+      weekly_accuracy_percentage: 0,
+      total_coupons: 0,
+    },
+  };
+}
+
+function isBackendUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("backend proxy error") ||
+    normalized.includes("upstream targets failed") ||
+    normalized.includes("fetch failed") ||
+    normalized.includes("http 502") ||
+    normalized.includes("http 503")
+  );
+}
+
 function buildSummary(items: HistoryItem[]): LocalSummary {
   const total = items.length;
   const pending = items.filter((item) => item.was_correct === null).length;
@@ -127,7 +154,12 @@ export default function HistoryPage() {
         });
         setHistory(response);
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "Gecmis verisi alinamadi.");
+        if (isBackendUnavailableError(requestError)) {
+          setHistory(createEmptyHistory());
+          setError("");
+        } else {
+          setError(requestError instanceof Error ? requestError.message : "Gecmis verisi alinamadi.");
+        }
       } finally {
         setLoading(false);
       }
