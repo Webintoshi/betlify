@@ -1,0 +1,56 @@
+name: betify-coolify
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - APP_ENV=production
+      - LOCAL_DB_MODE=false
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - API_FOOTBALL_KEY=${API_FOOTBALL_KEY:-}
+      - THE_ODDS_API_KEY=${THE_ODDS_API_KEY:-}
+      - ODDS_API_IO_KEY=${ODDS_API_IO_KEY:-}
+      - ODDS_API_BOOKMAKER=${ODDS_API_BOOKMAKER:-Betfair Exchange}
+      - ODDS_API_MAX_REQ_PER_HOUR=${ODDS_API_MAX_REQ_PER_HOUR:-100}
+      - ODDS_API_MIN_DEPTH=${ODDS_API_MIN_DEPTH:-50}
+      - ODDS_API_MAX_SPREAD_PCT=${ODDS_API_MAX_SPREAD_PCT:-0.06}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY:-}
+      - DEFAULT_SEASON=${DEFAULT_SEASON:-2024}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "8000"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL:-/api/backend}
+      - BACKEND_INTERNAL_URL=${BACKEND_INTERNAL_URL:-http://backend:8000}
+      - SERVICE_URL_BACKEND=${SERVICE_URL_BACKEND:-http://backend:8000}
+      - BACKEND_URL=${BACKEND_URL:-http://backend:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
